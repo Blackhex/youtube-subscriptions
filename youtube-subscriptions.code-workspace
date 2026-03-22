@@ -1,0 +1,18 @@
+{
+  "extensions": {
+    "recommendations": [
+      "darthminos.workspace-tasks",
+      "mhutchie.git-graph"
+    ]
+  },
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "chat.tools.terminal.autoReplyToPrompts": true,
+    "task.allowAutomaticTasks": "on",
+    "terminal.integrated.defaultProfile.windows": "Git Bash"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "tasks": [
+    {
+      "command": "python app.py",
+      "group": {
+        "isDefault": true,
+        "kind": "build"
+      },
+      "isBackground": true,
+      "label": "Run App",
+      "problemMatcher": [],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "type": "shell"
+    },
+    {
+      "command": "pip install -r requirements.txt",
+      "label": "Install Dependencies",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "python migrate_db.py",
+      "label": "Migrate Database",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "Remove-Item -Path instance/subscriptions.db -ErrorAction SilentlyContinue; Write-Host 'Database deleted. Restart the app to recreate.'",
+      "label": "Reset Database",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "Remove-Item -Path token.json -ErrorAction SilentlyContinue; Write-Host 'Token deleted. Restart the app to re-authenticate.'",
+      "label": "Delete OAuth Token",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "${input:openSimpleBrowser}",
+      "label": "Open in Browser",
+      "problemMatcher": [],
+      "type": "shell"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "openSimpleBrowser",
+      "type": "command",
+      "command": "simpleBrowser.api.open",
+      "args": "http://127.0.0.1:5000"
+    }
+  ],
+  "version": "2.0.0"
+}
