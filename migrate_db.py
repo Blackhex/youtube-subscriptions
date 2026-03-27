@@ -42,6 +42,19 @@ def _migrate_file(db_path):
         else:
             logger.info("subscription_id column already exists")
 
+        # Migrate videos table
+        cursor.execute("PRAGMA table_info(videos)")
+        video_columns = [col[1] for col in cursor.fetchall()]
+        logger.debug("Fetched %s video columns", len(video_columns))
+
+        if 'playback_progress' not in video_columns:
+            logger.info("Adding playback_progress column to videos table")
+            cursor.execute("ALTER TABLE videos ADD COLUMN playback_progress INTEGER")
+            conn.commit()
+            logger.info("playback_progress column added successfully")
+        else:
+            logger.info("playback_progress column already exists")
+
         if 'videos_synced_at' not in column_names:
             logger.info("Adding videos_synced_at column to subscriptions table")
             cursor.execute("ALTER TABLE subscriptions ADD COLUMN videos_synced_at DATETIME")
@@ -49,6 +62,19 @@ def _migrate_file(db_path):
             logger.info("videos_synced_at column added successfully")
         else:
             logger.info("videos_synced_at column already exists")
+
+        # Migrate videos table
+        cursor.execute("PRAGMA table_info(videos)")
+        video_columns = [col[1] for col in cursor.fetchall()]
+        logger.debug("Fetched %s video columns", len(video_columns))
+
+        if 'thumbnail_path' not in video_columns:
+            logger.info("Adding thumbnail_path column to videos table")
+            cursor.execute("ALTER TABLE videos ADD COLUMN thumbnail_path VARCHAR(512)")
+            conn.commit()
+            logger.info("thumbnail_path column added successfully")
+        else:
+            logger.info("thumbnail_path column already exists")
         
         conn.close()
         logger.debug("Closed database connection for db_path=%s", db_path)

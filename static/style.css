@@ -83,6 +83,7 @@ body {
 }
 
 .card-header {
+    height: 3em;
     border-bottom: 1px solid #e8e8e8 !important;
     background-color: white !important;
     flex-shrink: 0;
@@ -286,6 +287,22 @@ body {
 
 .list-item.watched:hover {
     opacity: 0.8;
+}
+
+.load-more-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.75rem 0.5rem;
+    color: var(--text-secondary, #6c757d);
+    font-size: 0.85rem;
+}
+
+.load-more-indicator .spinner-border {
+    width: 1rem;
+    height: 1rem;
 }
 
 .list-item-thumb {

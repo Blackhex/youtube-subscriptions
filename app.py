@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ db.init_app(app)
 CORS(app)
 
 youtube_service = None
+THUMBNAIL_CACHE_DIR = Path(app.instance_path) / "thumbnails"
 
 
 def get_youtube_service() -> YouTubeService:
@@ -39,6 +41,35 @@ def get_youtube_service() -> YouTubeService:
     else:
         logger.debug("Reusing existing YouTube service")
     return youtube_service
+
+
+def _thumbnail_extension(content_type: str, thumbnail_url: str) -> str:
+    content_type = (content_type or "").lower()
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    if "gif" in content_type:
+        return ".gif"
+
+    suffix = Path(thumbnail_url).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return suffix
+    return ".jpg"
+
+
+def _cache_thumbnail(thumbnail_url: Optional[str], video_id: str) -> Optional[str]:
+    if not thumbnail_url:
+        return None
+
+    THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    response = requests.get(thumbnail_url, timeout=20)
+    response.raise_for_status()
+
+    extension = _thumbnail_extension(response.headers.get("Content-Type", ""), thumbnail_url)
+    cached_path = THUMBNAIL_CACHE_DIR / f"{video_id}{extension}"
+    cached_path.write_bytes(response.content)
+    return str(cached_path)
 
 
 # ============================================================================
@@ -433,20 +464,35 @@ def _run_video_sync_inner(channel_ids: Optional[List[str]] = None, force: bool =
             except Exception:
                 logger.exception("Failed to fetch video details; storing without duration/type")
 
+        playback_progress: Dict[str, int] = {}
+        if new_ids_list:
+            try:
+                playback_progress = bg_service.fetch_watch_progress(new_ids_list)
+            except Exception:
+                logger.exception("Failed to fetch watch progress during sync")
+
         # --- Write new videos to DB ---
         sync_ts = datetime.utcnow()
         fetched_new = 0
 
         for v in new_video_data:
+            thumbnail_path = None
+            try:
+                thumbnail_path = _cache_thumbnail(v.get("thumbnailUrl"), v["videoId"])
+            except Exception:
+                logger.exception("Failed to cache thumbnail for video_id=%s", v["videoId"])
+
             details = video_details.get(v["videoId"], {})
             vid = Video(
                 video_id=v["videoId"],
                 channel_id=v["_channel_id"],
                 title=v.get("title", ""),
                 thumbnail_url=v.get("thumbnailUrl"),
+                thumbnail_path=thumbnail_path,
                 published_at=_parse_iso(v.get("publishedAt")),
                 duration_seconds=details.get("duration_seconds"),
                 video_type=details.get("video_type"),
+                playback_progress=playback_progress.get(v["videoId"]),
             )
             db.session.add(vid)
             fetched_new += 1
@@ -692,28 +738,44 @@ def reorder_categories() -> Dict[str, Any]:
 
 @app.get("/api/subscriptions")
 def get_subscriptions() -> Dict[str, Any]:
-    """Get all subscriptions, optionally filtered by category."""
+    """Get subscriptions with pagination, optionally filtered by category."""
     category_id = request.args.get("category_id", type=int)
     uncategorized = request.args.get("uncategorized", type=str)
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    per_page = min(per_page, 200)
     logger.debug(
-        "Handling get_subscriptions request category_id=%s uncategorized=%s",
+        "Handling get_subscriptions request category_id=%s uncategorized=%s page=%s per_page=%s",
         category_id,
         uncategorized,
+        page,
+        per_page,
     )
 
     if uncategorized == "true":
-        # Get subscriptions with no categories
-        subscriptions = Subscription.query.filter(
+        query = Subscription.query.filter(
             ~Subscription.categories.any()
-        ).all()
+        )
     elif category_id:
-        category = Category.query.get_or_404(category_id)
-        subscriptions = category.subscriptions
+        Category.query.get_or_404(category_id)
+        query = Subscription.query.filter(
+            Subscription.categories.any(Category.id == category_id)
+        )
     else:
-        subscriptions = Subscription.query.all()
+        query = Subscription.query
 
-    logger.debug("Returning %s subscriptions", len(subscriptions))
-    return jsonify([sub.to_dict(include_categories=True) for sub in subscriptions])
+    query = query.order_by(Subscription.channel_title)
+    total = query.count()
+    subscriptions = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    logger.debug("Returning %s/%s subscriptions page=%s", len(subscriptions), total, page)
+    return jsonify({
+        "items": [sub.to_dict(include_categories=True) for sub in subscriptions],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "has_more": page * per_page < total,
+    })
 
 
 @app.get("/api/subscriptions/<int:sub_id>")
@@ -1086,29 +1148,47 @@ def get_feed_videos(feed_id: int):
         cutoff = datetime.utcnow() - timedelta(days=feed.filter_max_age_days)
         query = query.filter(Video.published_at >= cutoff)
 
-    videos = query.order_by(Video.published_at.desc()).limit(50).all()
-    logger.debug("Returning %s videos for feed_id=%s", len(videos), feed_id)
-    return jsonify([v.to_dict() for v in videos])
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    per_page = min(per_page, 100)
+
+    total = query.count()
+    videos = query.order_by(Video.published_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    logger.debug("Returning %s/%s videos for feed_id=%s page=%s", len(videos), total, feed_id, page)
+    return jsonify({
+        "items": [v.to_dict() for v in videos],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "has_more": page * per_page < total,
+    })
 
 
-@app.post("/api/videos/watch-progress")
-def get_watch_progress():
-    """Fetch watch progress for a list of video IDs via YouTube InnerTube API."""
-    data = request.json or {}
-    video_ids: List[str] = data.get("video_ids", [])
-    logger.debug("Handling get_watch_progress request video_count=%s", len(video_ids))
+@app.get("/api/videos/<string:video_id>/thumbnail")
+def get_video_thumbnail(video_id: str):
+    """Serve a cached thumbnail for a video."""
+    logger.debug("Handling get_video_thumbnail video_id=%s", video_id)
+    video = Video.query.filter_by(video_id=video_id).first_or_404()
 
-    if not video_ids:
-        return jsonify({})
+    if not video.thumbnail_path:
+        logger.debug("Thumbnail not cached yet for video_id=%s; caching now", video_id)
+        try:
+            cached_path = _cache_thumbnail(video.thumbnail_url, video.video_id)
+            if not cached_path:
+                return jsonify({"error": "Thumbnail not cached"}), 404
+            video.thumbnail_path = cached_path
+            db.session.commit()
+        except Exception:
+            logger.exception("Failed to cache thumbnail on demand for video_id=%s", video_id)
+            db.session.rollback()
+            return jsonify({"error": "Thumbnail not cached"}), 404
 
-    try:
-        service = get_youtube_service()
-        progress = service.fetch_watch_progress(video_ids)
-        logger.debug("Returning watch progress for %s/%s videos", len(progress), len(video_ids))
-        return jsonify(progress)
-    except Exception:
-        logger.exception("Error fetching watch progress")
-        return jsonify({})
+    thumbnail_path = Path(video.thumbnail_path)
+    if not thumbnail_path.exists():
+        logger.debug("Cached thumbnail missing for video_id=%s path=%s", video_id, video.thumbnail_path)
+        return jsonify({"error": "Thumbnail not found"}), 404
+
+    return send_from_directory(str(thumbnail_path.parent), thumbnail_path.name)
 
 
 # ============================================================================

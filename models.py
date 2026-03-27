@@ -102,24 +102,31 @@ class Video(db.Model):
     title = db.Column(db.String(512), nullable=False)
     description = db.Column(db.Text, nullable=True)
     thumbnail_url = db.Column(db.String(512), nullable=True)
+    thumbnail_path = db.Column(db.String(512), nullable=True)
     published_at = db.Column(db.DateTime, nullable=True)
     duration_seconds = db.Column(db.Integer, nullable=True)
     video_type = db.Column(db.String(32), nullable=True)  # video, short, live
+    playback_progress = db.Column(db.Integer, nullable=True)  # percent watched 0-100
     fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     subscription = db.relationship("Subscription", backref="videos", foreign_keys=[channel_id], primaryjoin="Video.channel_id == Subscription.channel_id")
 
     def to_dict(self):
+        thumbnail_url = None
+        if self.thumbnail_url or self.thumbnail_path:
+            thumbnail_url = f"/api/videos/{self.video_id}/thumbnail"
+
         return {
             "id": self.id,
             "video_id": self.video_id,
             "channel_id": self.channel_id,
             "title": self.title,
             "description": self.description,
-            "thumbnail_url": self.thumbnail_url,
+            "thumbnail_url": thumbnail_url,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "duration_seconds": self.duration_seconds,
             "video_type": self.video_type,
+            "playback_progress": self.playback_progress,
             "channel_title": self.subscription.channel_title if self.subscription else None,
         }
 
@@ -160,7 +167,6 @@ class Feed(db.Model):
         return raw
 
     def to_dict(self):
-        import json
         return {
             "id": self.id,
             "name": self.name,

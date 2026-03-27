@@ -358,7 +358,7 @@ class YouTubeService:
 
             try:
                 resp = http_requests.post(
-                    innertube_url, headers=headers, json=body, timeout=10
+                    innertube_url, headers=headers, json=body, timeout=30
                 )
                 resp.raise_for_status()
                 data = resp.json()

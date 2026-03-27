@@ -8,6 +8,8 @@ let draggedCategoryId = null;
 let draggedParentId = null;
 let currentSearchQuery = "";
 let suggestedCategoryIds = [];
+let subscriptionsLoadingMore = false;
+const feedVideoPagination = {};
 
 // API base URL
 const API_BASE = "/api";
@@ -35,6 +37,86 @@ function hideModal(modalId) {
   const modal = bootstrap.Modal.getInstance(modalElement);
   if (modal) {
     modal.hide();
+  }
+}
+
+function getSubscriptionsEndpoint(categoryId = selectedCategoryId) {
+  if (categoryId === "uncategorized") {
+    return "/subscriptions?uncategorized=true";
+  }
+  if (categoryId) {
+    return `/subscriptions?category_id=${categoryId}`;
+  }
+  return "/subscriptions";
+}
+
+function bindAutoLoadOnScroll(container, loadMoreFn, canLoadMoreFn, isLoadingFn) {
+  if (!container) {
+    return;
+  }
+
+  if (container._autoLoadScrollHandler) {
+    container.removeEventListener("scroll", container._autoLoadScrollHandler);
+  }
+
+  const handler = () => {
+    if (!canLoadMoreFn() || isLoadingFn()) {
+      return;
+    }
+
+    const nearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 120;
+    if (nearBottom) {
+      loadMoreFn();
+    }
+  };
+
+  container._autoLoadScrollHandler = handler;
+  container.addEventListener("scroll", handler, { passive: true });
+}
+
+function ensureLoadMoreIndicator(container) {
+  let indicator = container.querySelector(".load-more-indicator");
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.className = "load-more-indicator d-none";
+    indicator.innerHTML = `
+      <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
+      <span>Loading more</span>
+    `;
+    container.appendChild(indicator);
+  }
+  return indicator;
+}
+
+function setLoadMoreIndicator(container, isVisible) {
+  if (!container) {
+    return;
+  }
+
+  const indicator = ensureLoadMoreIndicator(container);
+  indicator.classList.toggle("d-none", !isVisible);
+}
+
+function getFeedVideoPagination(feedId) {
+  if (!feedVideoPagination[feedId]) {
+    feedVideoPagination[feedId] = {
+      page: 1,
+      hasMore: false,
+      loading: false,
+    };
+  }
+
+  return feedVideoPagination[feedId];
+}
+
+function resetScrollSentinel(container) {
+  if (!container) {
+    return;
+  }
+
+  const sentinel = container.querySelector(".load-more-indicator");
+  if (sentinel) {
+    sentinel.remove();
   }
 }
 
@@ -523,23 +605,100 @@ async function deleteCategory(categoryId) {
 // Subscription functions
 // ============================================================================
 
+let subscriptionsPage = 1;
+let subscriptionsHasMore = false;
+
 async function loadSubscriptions(categoryId = null) {
   try {
     showSpinner();
-    let endpoint;
-    if (categoryId === "uncategorized") {
-      endpoint = "/subscriptions?uncategorized=true";
-    } else if (categoryId) {
-      endpoint = `/subscriptions?category_id=${categoryId}`;
-    } else {
-      endpoint = "/subscriptions";
-    }
-    allSubscriptions = await fetchAPI(endpoint);
+    selectedCategoryId = categoryId;
+    subscriptionsPage = 1;
+    subscriptionsLoadingMore = false;
+    const endpoint = getSubscriptionsEndpoint(categoryId);
+    const data = await fetchAPI(`${endpoint}${endpoint.includes('?') ? '&' : '?'}page=1&per_page=50`);
+    allSubscriptions = data.items;
+    subscriptionsHasMore = data.has_more;
     renderSubscriptions();
   } catch (error) {
     showToast(`Error loading subscriptions: ${error.message}`, "error");
   } finally {
     hideSpinner();
+  }
+}
+
+async function loadMoreSubscriptions() {
+  try {
+    if (subscriptionsLoadingMore || !subscriptionsHasMore || currentSearchQuery) {
+      return;
+    }
+
+    subscriptionsLoadingMore = true;
+    const container = document.getElementById("subscriptionsList");
+    setLoadMoreIndicator(container, true);
+    const endpoint = getSubscriptionsEndpoint();
+    const nextPage = subscriptionsPage + 1;
+    const data = await fetchAPI(`${endpoint}${endpoint.includes('?') ? '&' : '?'}page=${nextPage}&per_page=50`);
+    const newSubscriptions = data.items;
+    allSubscriptions = allSubscriptions.concat(newSubscriptions);
+    subscriptionsHasMore = data.has_more;
+    subscriptionsPage = nextPage;
+
+    if (container) {
+      resetScrollSentinel(container);
+
+      const fragment = document.createElement("div");
+      fragment.innerHTML = newSubscriptions.map((sub) => {
+        const isSelected = selectedSubscriptionIds.includes(sub.id);
+        return `
+        <div class="list-item subscription-item ${isSelected ? "selected" : ""}" data-subscription-id="${sub.id}" onclick="toggleSubscriptionSelection(${sub.id}, event)">
+            <input type="checkbox" class="list-item-checkbox" ${isSelected ? "checked" : ""} onclick="event.stopPropagation(); toggleSubscriptionSelection(${sub.id}, event)">
+            <img src="${sub.thumbnail_url || 'https://via.placeholder.com/80'}" 
+                 alt="${sub.channel_title}" 
+                 class="list-item-thumb subscription-thumbnail">
+            <div class="list-item-info">
+                <div class="list-item-title">${sub.channel_title}</div>
+                <div class="list-item-subtitle">${sub.channel_description || "No description"}</div>
+                <div class="list-item-meta">
+                    ${sub.categories && sub.categories.length > 0
+          ? sub.categories
+            .map((cat) => `<span class="category-badge">${cat.name}</span>`)
+            .join("")
+          : '<span class="text-muted">Uncategorized</span>'
+        }
+                </div>
+            </div>
+            <button class="btn-action btn-action-danger btn-action-reveal" onclick="event.stopPropagation(); unsubscribeChannel(${sub.id})" title="Unsubscribe">
+                <span class="material-icons">delete</span>
+            </button>
+        </div>
+    `;
+      }).join("");
+
+      while (fragment.firstChild) {
+        container.appendChild(fragment.firstChild);
+      }
+
+      if (subscriptionsHasMore && !currentSearchQuery) setLoadMoreIndicator(container, false);
+
+      bindAutoLoadOnScroll(
+        container,
+        loadMoreSubscriptions,
+        () => subscriptionsHasMore && !currentSearchQuery,
+        () => subscriptionsLoadingMore
+      );
+    }
+  } catch (error) {
+    showToast(`Error loading more subscriptions: ${error.message}`, "error");
+  } finally {
+    const container = document.getElementById("subscriptionsList");
+    if (container) {
+      if (subscriptionsHasMore && !currentSearchQuery) {
+        setLoadMoreIndicator(container, false);
+      } else {
+        resetScrollSentinel(container);
+      }
+    }
+    subscriptionsLoadingMore = false;
   }
 }
 
@@ -556,7 +715,7 @@ function renderSubscriptions(subscriptions = allSubscriptions) {
     return;
   }
 
-  container.innerHTML = subscriptions
+  const html = subscriptions
     .map(
       (sub) => {
         const isSelected = selectedSubscriptionIds.includes(sub.id);
@@ -586,6 +745,19 @@ function renderSubscriptions(subscriptions = allSubscriptions) {
       }
     )
     .join("");
+
+  container.innerHTML = html;
+
+  if (subscriptionsHasMore && !currentSearchQuery) {
+    setLoadMoreIndicator(container, false);
+  } else {
+    const indicator = container.querySelector(".load-more-indicator");
+    if (indicator) {
+      indicator.remove();
+    }
+  }
+
+  bindAutoLoadOnScroll(container, loadMoreSubscriptions, () => subscriptionsHasMore && !currentSearchQuery, () => subscriptionsLoadingMore);
 }
 
 async function syncSubscriptions() {
@@ -872,76 +1044,125 @@ function findFeedCategoryById(id, categories = allCategories) {
   return null;
 }
 
+function renderVideoItem(v) {
+  return `
+    <a class="list-item" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener"
+       data-video-id="${v.video_id}">
+      <div class="thumb-container">
+        <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
+        ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
+      </div>
+      <div class="list-item-info">
+        <div class="list-item-title">${v.title}</div>
+        <div class="list-item-subtitle">${v.channel_title || ''}</div>
+        <div class="list-item-meta">${v.published_at ? timeAgo(v.published_at) : ''}</div>
+      </div>
+    </a>
+  `;
+}
+
+function applyWatchedState(container, videos) {
+  for (const v of videos) {
+    if (v.playback_progress >= 95) {
+      const link = container.querySelector(`a[data-video-id="${CSS.escape(v.video_id)}"]`);
+      if (link) {
+        link.classList.add('watched');
+        const thumbContainer = link.querySelector('.thumb-container');
+        if (thumbContainer) {
+          const bar = document.createElement('div');
+          bar.className = 'progress-bar-container';
+          bar.innerHTML = `<div class="progress-bar-fill" style="width:100%"></div>`;
+          thumbContainer.appendChild(bar);
+        }
+      }
+    }
+  }
+}
+
+function renderVideoListContainer(videos, loadMoreEnabled) {
+  const listHtml = videos.map(renderVideoItem).join("");
+  const sentinelHtml = loadMoreEnabled
+    ? `<div class="load-more-indicator d-none"><div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span>Loading more</span></div>`
+    : "";
+  return listHtml + sentinelHtml;
+}
+
 async function loadFeedVideos(feedId) {
   try {
-    const videos = await fetchAPI(`/feeds/${feedId}/videos`);
+    const pagination = getFeedVideoPagination(feedId);
+    pagination.page = 1;
+    pagination.hasMore = false;
+    pagination.loading = false;
+    const data = await fetchAPI(`/feeds/${feedId}/videos?page=1&per_page=20`);
     const container = document.getElementById(`feedVideos-${feedId}`);
     if (!container) return;
 
-    if (videos.length === 0) {
+    if (data.items.length === 0) {
       container.innerHTML = `<div class="text-center p-3 text-muted small">No videos match this feed's filters.<br>Try fetching videos first.</div>`;
       return;
     }
 
-    container.innerHTML = videos.map(v => `
-      <a class="list-item" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener"
-         data-video-id="${v.video_id}">
-        <div class="thumb-container">
-          <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
-          ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
-        </div>
-        <div class="list-item-info">
-          <div class="list-item-title">${v.title}</div>
-          <div class="list-item-subtitle">${v.channel_title || ''}</div>
-          <div class="list-item-meta">${v.published_at ? timeAgo(v.published_at) : ''}</div>
-        </div>
-      </a>
-    `).join("");
+    container.innerHTML = renderVideoListContainer(data.items, data.has_more);
+    pagination.hasMore = data.has_more;
 
-    // Fetch watch progress asynchronously and overlay
-    const videoIds = videos.map(v => v.video_id);
-    loadWatchProgress(feedId, videoIds);
+    applyWatchedState(container, data.items);
+
+    bindAutoLoadOnScroll(
+      container,
+      () => loadMoreFeedVideos(feedId),
+      () => getFeedVideoPagination(feedId).hasMore,
+      () => getFeedVideoPagination(feedId).loading
+    );
   } catch (error) {
     const container = document.getElementById(`feedVideos-${feedId}`);
     if (container) container.innerHTML = `<div class="text-center p-2 text-danger small">Error loading videos</div>`;
   }
 }
 
-async function loadWatchProgress(feedId, videoIds) {
+async function loadMoreFeedVideos(feedId) {
   try {
-    const progress = await fetchAPI('/videos/watch-progress', {
-      method: 'POST',
-      body: JSON.stringify({ video_ids: videoIds }),
-    });
-    if (!progress || Object.keys(progress).length === 0) return;
+    const pagination = getFeedVideoPagination(feedId);
+    if (pagination.loading || !pagination.hasMore) {
+      return;
+    }
 
+    pagination.loading = true;
     const container = document.getElementById(`feedVideos-${feedId}`);
+    setLoadMoreIndicator(container, true);
+    const page = (pagination.page || 1) + 1;
+    const data = await fetchAPI(`/feeds/${feedId}/videos?page=${page}&per_page=20`);
     if (!container) return;
 
-    for (const [videoId, percent] of Object.entries(progress)) {
-      const link = container.querySelector(`a[data-video-id="${CSS.escape(videoId)}"]`);
-      if (!link) continue;
+    const oldIndicator = container.querySelector('.load-more-indicator');
+    if (oldIndicator) oldIndicator.remove();
 
-      // Add watched class for fully watched videos
-      if (percent >= 95) link.classList.add('watched');
+    // Append new videos
+    const fragment = document.createElement('div');
+    fragment.innerHTML = data.items.map(renderVideoItem).join("");
+    while (fragment.firstChild) container.appendChild(fragment.firstChild);
 
-      // Add or update progress bar
-      const thumbContainer = link.querySelector('.thumb-container');
-      if (thumbContainer && percent > 0 && percent < 100) {
-        const bar = document.createElement('div');
-        bar.className = 'progress-bar-container';
-        bar.innerHTML = `<div class="progress-bar-fill" style="width:${percent}%"></div>`;
-        thumbContainer.appendChild(bar);
-      } else if (thumbContainer && percent >= 100) {
-        const bar = document.createElement('div');
-        bar.className = 'progress-bar-container';
-        bar.innerHTML = `<div class="progress-bar-fill" style="width:100%"></div>`;
-        thumbContainer.appendChild(bar);
+    // Keep the spinner indicator available only while more pages remain
+    if (data.has_more) {
+      setLoadMoreIndicator(container, false);
+    } else {
+      resetScrollSentinel(container);
+    }
+    pagination.hasMore = data.has_more;
+    pagination.page = page;
+
+    applyWatchedState(container, data.items);
+  } catch (error) {
+    showToast('Error loading more videos', 'error');
+  } finally {
+    const container = document.getElementById(`feedVideos-${feedId}`);
+    if (container) {
+      if (getFeedVideoPagination(feedId).hasMore) {
+        setLoadMoreIndicator(container, false);
+      } else {
+        resetScrollSentinel(container);
       }
     }
-  } catch (error) {
-    // Watch progress is non-critical; fail silently
-    console.debug('Watch progress fetch failed:', error);
+    getFeedVideoPagination(feedId).loading = false;
   }
 }
 
