@@ -6,61 +6,138 @@
     <title>YouTube Subscriptions Organizer</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons&display=swap">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=20260324">
 </head>
 <body>
-    <div class="container-fluid p-0">
-        <nav class="navbar navbar-dark bg-primary px-3 py-2">
-            <div class="ms-auto">
-                <button id="syncBtn" class="btn btn-icon" title="Sync subscriptions from YouTube">
-                    <span class="material-icons">sync</span>
+    <div class="container-fluid flex-col p-0">
+        <nav class="navbar navbar-dark bg-primary px-3 py-2 flex-noshrink">
+            <ul class="nav nav-pills" id="mainNav">
+                <li class="nav-item">
+                    <a class="nav-link active nav-link-custom" href="#" data-section="feeds" onclick="switchSection('feeds')">Feeds</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link nav-link-custom" href="#" data-section="subscriptions" onclick="switchSection('subscriptions')">Subscriptions</a>
+                </li>
+            </ul>
+            <div class="ms-auto d-flex align-items-center gap-0">
+                <button id="newFeedBtn" class="btn btn-icon d-none" title="New Feed" onclick="openFeedModal()">
+                    <span class="material-icons">note_add</span>
+                </button>
+                <button id="newCategoryBtn" class="btn btn-icon d-none" title="New Category">
+                    <span class="material-icons">create_new_folder</span>
+                </button>
+                <button id="getSuggestionsBtn" class="btn btn-icon d-none" title="Get AI category suggestions">
+                    <span class="material-icons">auto_awesome</span>
+                </button>
+                <button id="syncBtn" class="btn btn-icon" title="Sync subscriptions and videos from YouTube">
+                    <span class="material-icons" id="syncBtnIcon">sync</span>
                 </button>
             </div>
         </nav>
 
-        <div class="row g-2 p-2">
+        <!-- Section: Subscriptions -->
+        <div id="sectionSubscriptions" class="row g-2 p-2 d-none flex-fill">
             <!-- Sidebar: Categories -->
-            <aside class="col-12 col-md-3 col-lg-2">
-                <div class="card shadow-sm h-100">
-                    <div class="card-header bg-white d-flex justify-content-between align-items-center py-2">
+            <aside class="col-12 col-md-3 col-lg-2 flex-col">
+                <div class="card">
+                    <div class="card-header">
                         <h6 class="mb-0 fw-semibold">Categories</h6>
-                        <div class="btn-group btn-group-sm">
-                            <button id="getSuggestionsBtn" class="btn btn-sm btn-primary" style="display: none;" title="Get AI category suggestions">
-                                ✨
-                            </button>
-                            <button id="newCategoryBtn" class="btn btn-sm btn-success">+</button>
-                        </div>
                     </div>
-                    <div class="list-group list-group-flush">
-                        <div class="special-filter-item list-group-item list-group-item-action border-0 py-2 px-3" id="filterAll" onclick="selectSpecialFilter('all')">
-                            <span class="filter-icon me-2">📂</span>
-                            <span class="filter-label">All Subscriptions</span>
+                    <div class="special-filters flex-noshrink">
+                        <div class="special-filter-item py-1 px-3" id="filterAll" onclick="selectSpecialFilter('all')">
+                            <span class="material-icons filter-icon me-1">folder</span>
+                            <span class="filter-label">All</span>
                         </div>
-                        <div class="special-filter-item list-group-item list-group-item-action border-0 py-2 px-3" id="filterUncategorized" onclick="selectSpecialFilter('uncategorized')">
-                            <span class="filter-icon me-2">📄</span>
+                        <div class="special-filter-item py-1 px-3" id="filterUncategorized" onclick="selectSpecialFilter('uncategorized')">
+                            <span class="material-icons filter-icon me-1">description</span>
                             <span class="filter-label">Uncategorized</span>
                         </div>
                     </div>
-                    <div id="categoriesTree" class="categories-tree p-2">
+                    <div id="categoriesTree" class="categories-tree flex-fill scrollable p-2">
                         <!-- Categories tree will be rendered here -->
                     </div>
                 </div>
             </aside>
 
             <!-- Main content: Subscriptions -->
-            <main class="col-12 col-md-9 col-lg-10">
-                <div class="card shadow-sm h-100">
-                    <div class="card-header bg-white d-flex justify-content-between align-items-center py-2">
-                        <h6 class="mb-0 fw-semibold" id="contentTitle">All Subscriptions</h6>
+            <main class="col-12 col-md-9 col-lg-10 flex-col">
+                <div class="card">
+                    <div class="card-header">
+                        <h6 class="mb-0 fw-semibold" id="contentTitle">All</h6>
                         <div>
-                            <input type="text" id="searchInput" class="form-control form-control-sm" placeholder="Search..." style="width: 200px;">
+                            <input type="text" id="searchInput" class="form-control form-control-sm" placeholder="Search...">
                         </div>
                     </div>
-                    <div id="subscriptionsList" class="subscriptions-list p-2">
+                    <div id="subscriptionsList" class="flex-fill scrollable p-2">
                         <!-- Subscriptions will be rendered here -->
                     </div>
                 </div>
             </main>
+        </div>
+
+        <!-- Section: Video Feeds -->
+        <div id="sectionFeeds" class="flex-col flex-fill p-2">
+            <div id="feedColumns" class="column-layout flex-fill scrollable-x">
+                <!-- Feed columns rendered here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Create/Edit Feed -->
+    <div id="feedModal" class="modal fade" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="feedModalTitle">New Feed</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form id="feedForm" onsubmit="saveFeed(event)">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="feedName" class="form-label">Name:</label>
+                            <input type="text" id="feedName" class="form-control" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Categories:</label>
+                            <div id="feedCategoryGroups">
+                                <!-- Category groups rendered dynamically -->
+                            </div>
+                            <button type="button" class="btn btn-outline-secondary btn-sm mt-1" onclick="addCategoryGroup()">
+                                <span class="material-icons md-sm">add</span> AND group
+                            </button>
+                            <small class="text-muted d-block mt-1">Within a group: OR (any match). Between groups: AND (all must match). Leave empty for all.</small>
+                        </div>
+                        <div class="mb-3">
+                            <label for="feedVideoType" class="form-label">Video Type:</label>
+                            <select id="feedVideoType" class="form-select">
+                                <option value="">All Types</option>
+                                <option value="video">Regular Videos</option>
+                                <option value="short">Shorts</option>
+                                <option value="live">Live Streams</option>
+                            </select>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-6">
+                                <label for="feedMinDuration" class="form-label">Min Duration (min):</label>
+                                <input type="number" id="feedMinDuration" class="form-control" min="0" placeholder="Any">
+                            </div>
+                            <div class="col-6">
+                                <label for="feedMaxDuration" class="form-label">Max Duration (min):</label>
+                                <input type="number" id="feedMaxDuration" class="form-control" min="0" placeholder="Any">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="feedMaxAge" class="form-label">Max Age (days):</label>
+                            <input type="number" id="feedMaxAge" class="form-control" min="1" placeholder="No limit">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" id="feedDeleteBtn" class="btn btn-danger me-auto d-none" onclick="deleteFeedFromModal()"><span class="material-icons md-md">delete</span> Delete</button>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
 
@@ -100,12 +177,48 @@
 
     <!-- Loading spinner -->
     <div id="loadingSpinner" class="position-fixed top-50 start-50 translate-middle d-none">
-        <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;">
+        <div class="spinner-border text-primary spinner-lg" role="status">
             <span class="visually-hidden">Loading...</span>
         </div>
     </div>
 
+    <!-- Alert Dialog -->
+    <div id="alertDialog" class="modal fade" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered modal-sm">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title" id="alertDialogTitle">Notice</h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body dialog-body" id="alertDialogBody"></div>
+                <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-primary" id="alertDialogOk" data-bs-dismiss="modal">OK</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Dialog -->
+    <div id="confirmDialog" class="modal fade" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered modal-sm">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h6 class="modal-title" id="confirmDialogTitle">Confirm</h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body dialog-body" id="confirmDialogBody"></div>
+                <div class="modal-footer py-2">
+                    <button type="button" class="btn btn-sm btn-secondary" id="confirmDialogCancel" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-primary" id="confirmDialogOk">OK</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toastContainer" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260324"></script>
 </body>
 </html>
