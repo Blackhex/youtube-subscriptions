@@ -28,7 +28,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 CORS(app)
 
-youtube_service = None
+_youtube_service_local = threading.local()
 THUMBNAIL_CACHE_DIR = Path(app.instance_path) / "thumbnails"
 
 # Lounge session state for Cast playback tracking
@@ -59,14 +59,15 @@ def _load_lounge_session() -> Optional[Dict[str, str]]:
 
 
 def get_youtube_service() -> YouTubeService:
-    """Lazily initialize YouTube service."""
-    global youtube_service
-    if youtube_service is None:
-        logger.debug("Initializing YouTube service")
-        youtube_service = YouTubeService()
+    """Lazily initialize a thread-local YouTube service."""
+    service = getattr(_youtube_service_local, "service", None)
+    if service is None:
+        logger.debug("Initializing YouTube service for thread=%s", threading.current_thread().name)
+        service = YouTubeService()
+        _youtube_service_local.service = service
     else:
-        logger.debug("Reusing existing YouTube service")
-    return youtube_service
+        logger.debug("Reusing thread-local YouTube service for thread=%s", threading.current_thread().name)
+    return service
 
 
 def _thumbnail_extension(content_type: str, thumbnail_url: str) -> str:
@@ -114,6 +115,26 @@ def _clear_queue_items() -> None:
     """Remove all queue items."""
     QueueItem.query.delete()
     db.session.commit()
+
+
+def _reorder_queue_items(ordered_ids: List[int]) -> Dict[str, Any]:
+    """Persist a new queue item order."""
+    queue_items = cast(List[QueueItem], QueueItem.query.all())
+    queue_items_by_id = {item.id: item for item in queue_items}
+    current_ids = set(queue_items_by_id.keys())
+    requested_ids = set(ordered_ids)
+
+    if len(ordered_ids) != len(current_ids):
+        raise ValueError("Queue item list is incomplete")
+
+    if requested_ids != current_ids:
+        raise ValueError("Queue item IDs do not match the current queue")
+
+    for sort_order, queue_item_id in enumerate(ordered_ids, start=1):
+        queue_items_by_id[queue_item_id].sort_order = sort_order
+
+    db.session.commit()
+    return {"items": _serialize_queue_items(), "updated_count": len(ordered_ids)}
 
 
 def _playlist_title_for_queue(prefix: str) -> str:
@@ -865,6 +886,257 @@ def get_sync_status() -> Dict[str, Any]:
         return jsonify(dict(_sync_state))
 
 
+def _serialize_playlist_items_page(playlist_id: str, page: int, per_page: int) -> Dict[str, Any]:
+    """Fetch and enrich a single page of playlist items."""
+    service = get_youtube_service()
+    raw_data = service.fetch_playlist_items(playlist_id, page=page, per_page=per_page)
+    raw_items = cast(List[Dict[str, Any]], raw_data.get("items", []))
+    video_ids = [item.get("video_id") for item in raw_items if item.get("video_id")]
+
+    local_videos: Dict[str, Video] = {}
+    if video_ids:
+        local_rows = cast(List[Video], Video.query.filter(Video.video_id.in_(video_ids)).all())
+        local_videos = {video.video_id: video for video in local_rows}
+
+    video_details: Dict[str, Dict[str, Any]] = {}
+    if video_ids:
+        try:
+            video_details = service.fetch_video_details(video_ids)
+        except Exception:
+            logger.exception("Failed to fetch video details for playlist_id=%s page=%s", playlist_id, page)
+            video_details = {}
+
+    items: List[Dict[str, Any]] = []
+    for raw_item in raw_items:
+        video_id = raw_item.get("video_id")
+        local_video = local_videos.get(video_id or "")
+
+        if local_video:
+            video_data = local_video.to_dict()
+        else:
+            details = video_details.get(video_id or "", {})
+            video_data = {
+                "video_id": video_id,
+                "title": raw_item.get("title", "Untitled video"),
+                "channel_title": raw_item.get("channel_title", ""),
+                "published_at": raw_item.get("published_at"),
+                "thumbnail_url": raw_item.get("thumbnail_url"),
+                "duration_seconds": details.get("duration_seconds"),
+                "video_type": details.get("video_type"),
+                "playback_progress": None,
+            }
+
+        if not video_data.get("thumbnail_url"):
+            video_data["thumbnail_url"] = raw_item.get("thumbnail_url")
+        if not video_data.get("title"):
+            video_data["title"] = raw_item.get("title", "Untitled video")
+        if not video_data.get("channel_title"):
+            video_data["channel_title"] = raw_item.get("channel_title", "")
+        if not video_data.get("published_at"):
+            video_data["published_at"] = raw_item.get("published_at")
+
+        video_data["playlist_item_id"] = raw_item.get("playlist_item_id")
+        video_data["playlist_id"] = playlist_id
+        items.append(video_data)
+
+    return {
+        **raw_data,
+        "items": items,
+        "has_more": bool(raw_data.get("next_page_token")),
+    }
+
+
+# ============================================================================
+# Playlist API Endpoints
+# ============================================================================
+
+
+@app.get("/api/playlists")
+def get_playlists() -> Dict[str, Any]:
+    """Get all playlists owned by the authenticated user."""
+    logger.debug("Handling get_playlists request")
+    service = get_youtube_service()
+    playlists = service.fetch_owned_playlists()
+    return jsonify({"items": playlists})
+
+
+@app.post("/api/playlists/<string:playlist_id>/items")
+def add_playlist_items(playlist_id: str) -> Dict[str, Any]:
+    """Add one or more videos to a playlist."""
+    logger.debug("Handling add_playlist_items request playlist_id=%s", playlist_id)
+    data = request.get_json(silent=True) or {}
+    video_ids = data.get("video_ids")
+    if isinstance(video_ids, str):
+        video_ids = [video_ids]
+    elif data.get("video_id"):
+        video_ids = [data.get("video_id")]
+
+    if not isinstance(video_ids, list) or not video_ids:
+        return jsonify({"error": "video_ids must be a non-empty list"}), 400
+
+    try:
+        service = get_youtube_service()
+        added_count = service.add_videos_to_playlist(playlist_id, video_ids)
+        return jsonify({
+            "message": "Videos added to playlist",
+            "playlist_id": playlist_id,
+            "added_count": added_count,
+            "video_ids": video_ids,
+        }), 201
+    except Exception as error:
+        logger.exception("Failed to add playlist items playlist_id=%s", playlist_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.post("/api/playlists/<string:playlist_id>/items/reorder")
+def reorder_playlist_items(playlist_id: str) -> Dict[str, Any]:
+    """Reorder items in a playlist."""
+    logger.debug("Handling reorder_playlist_items request playlist_id=%s", playlist_id)
+    data = request.get_json(silent=True) or {}
+    playlist_item_ids = data.get("playlist_item_ids")
+    if not isinstance(playlist_item_ids, list) or not playlist_item_ids:
+        return jsonify({"error": "playlist_item_ids must be a non-empty list"}), 400
+
+    try:
+        service = get_youtube_service()
+        current_items = service.fetch_all_playlist_items(playlist_id)
+        items_by_id = {
+            item.get("playlist_item_id"): item
+            for item in current_items
+            if item.get("playlist_item_id") and item.get("video_id")
+        }
+
+        ordered_ids = []
+        for playlist_item_id in playlist_item_ids:
+            if playlist_item_id in items_by_id and playlist_item_id not in ordered_ids:
+                ordered_ids.append(playlist_item_id)
+
+        if len(ordered_ids) < 2:
+            return jsonify({"message": "Playlist order unchanged", "updated_count": 0}), 200
+
+        current_index_by_id = {
+            item["playlist_item_id"]: index
+            for index, item in enumerate(current_items)
+            if item.get("playlist_item_id")
+        }
+        insert_at = min(current_index_by_id[playlist_item_id] for playlist_item_id in ordered_ids)
+
+        updated_count = 0
+        for offset, playlist_item_id in enumerate(ordered_ids):
+            item = items_by_id[playlist_item_id]
+            service.update_playlist_item_position(
+                playlist_item_id=playlist_item_id,
+                playlist_id=playlist_id,
+                video_id=str(item["video_id"]),
+                position=insert_at + offset,
+            )
+            updated_count += 1
+
+        return jsonify({
+            "message": "Playlist reordered",
+            "playlist_id": playlist_id,
+            "updated_count": updated_count,
+            "playlist_item_ids": ordered_ids,
+        }), 200
+    except Exception as error:
+        logger.exception("Failed to reorder playlist items playlist_id=%s", playlist_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.get("/api/playlists/<string:playlist_id>/items")
+def get_playlist_items(playlist_id: str) -> Dict[str, Any]:
+    """Get a page of items for a specific playlist."""
+    page = request.args.get("page", default=1, type=int) or 1
+    per_page = request.args.get("per_page", default=20, type=int) or 20
+    logger.debug(
+        "Handling get_playlist_items request playlist_id=%s page=%s per_page=%s",
+        playlist_id,
+        page,
+        per_page,
+    )
+    try:
+        data = _serialize_playlist_items_page(playlist_id, page, per_page)
+        return jsonify(data)
+    except Exception as error:
+        logger.exception("Failed to load playlist items playlist_id=%s", playlist_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.delete("/api/playlists/<string:playlist_id>/items/<string:playlist_item_id>")
+def delete_playlist_item(playlist_id: str, playlist_item_id: str) -> Dict[str, Any]:
+    """Delete an item from a playlist."""
+    logger.debug(
+        "Handling delete_playlist_item request playlist_id=%s playlist_item_id=%s",
+        playlist_id,
+        playlist_item_id,
+    )
+    try:
+        service = get_youtube_service()
+        if not service.delete_playlist_item(playlist_item_id):
+            return jsonify({"error": "Failed to delete playlist item"}), 500
+        return jsonify({"message": "Playlist item removed", "playlist_id": playlist_id, "playlist_item_id": playlist_item_id})
+    except Exception as error:
+        logger.exception("Failed to delete playlist item playlist_item_id=%s", playlist_item_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.delete("/api/playlists/<string:playlist_id>")
+def delete_playlist(playlist_id: str) -> Dict[str, Any]:
+    """Delete an owned playlist."""
+    logger.debug("Handling delete_playlist request playlist_id=%s", playlist_id)
+    try:
+        service = get_youtube_service()
+        if not service.delete_playlist(playlist_id):
+            return jsonify({"error": "Failed to delete playlist"}), 500
+        return jsonify({"message": "Playlist deleted", "playlist_id": playlist_id})
+    except Exception as error:
+        logger.exception("Failed to delete playlist playlist_id=%s", playlist_id)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.post("/api/playlists/<string:playlist_id>/cast")
+def cast_playlist(playlist_id: str) -> Dict[str, Any]:
+    """Start playback for a playlist on a YouTube Cast receiver."""
+    logger.debug("Handling cast_playlist request playlist_id=%s", playlist_id)
+    try:
+        data = request.get_json(silent=True) or {}
+        screen_id = data.get("screen_id")
+        logger.debug("cast_playlist screen_id=%s", screen_id)
+
+        if not screen_id:
+            return jsonify({"error": "screen_id is required – ensure Cast session is connected"}), 400
+
+        service = get_youtube_service()
+        all_video_ids = service.fetch_all_playlist_video_ids(playlist_id)
+        if not all_video_ids:
+            return jsonify({"error": "No videos found in playlist"}), 400
+
+        lounge_result = service.cast_to_receiver(
+            screen_id=screen_id,
+            video_id=all_video_ids[0],
+            playlist_id=playlist_id,
+            video_ids=all_video_ids,
+        )
+
+        global _lounge_session
+        _lounge_session = {
+            "lounge_token": lounge_result.get("lounge_token", ""),
+            "SID": lounge_result.get("SID", ""),
+            "gsessionid": lounge_result.get("gsessionid", ""),
+            "has_played": False,
+        }
+        _save_lounge_session()
+
+        return jsonify({
+            "playlist_id": playlist_id,
+            "video_count": len(all_video_ids),
+            "lounge": lounge_result,
+        }), 201
+    except Exception as error:
+        logger.exception("Failed to cast playlist playlist_id=%s", playlist_id)
+        return jsonify({"error": str(error)}), 500
+
+
 # ============================================================================
 # Category API Endpoints
 # ============================================================================
@@ -1533,6 +1805,28 @@ def remove_queue_item(queue_item_id: int) -> Dict[str, Any]:
     db.session.delete(queue_item)
     db.session.commit()
     return jsonify({"message": "Queue item removed", "items": _serialize_queue_items()})
+
+
+@app.post("/api/queue/reorder")
+def reorder_queue_items() -> Dict[str, Any]:
+    """Reorder queue items."""
+    logger.debug("Handling reorder_queue_items request")
+    data = request.get_json(silent=True) or {}
+    ordered_ids = data.get("queue_item_ids")
+
+    if not isinstance(ordered_ids, list) or not ordered_ids:
+        return jsonify({"error": "queue_item_ids must be a non-empty list"}), 400
+
+    try:
+        ordered_queue_item_ids = [int(queue_item_id) for queue_item_id in ordered_ids]
+    except (TypeError, ValueError):
+        return jsonify({"error": "queue_item_ids must contain integers"}), 400
+
+    try:
+        result = _reorder_queue_items(ordered_queue_item_ids)
+        return jsonify({"message": "Queue reordered", **result})
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
 
 
 @app.post("/api/queue/clear")

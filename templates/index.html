@@ -16,6 +16,9 @@
                     <a class="nav-link active nav-link-custom" href="#" data-section="feeds" onclick="switchSection('feeds')">Feeds</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link nav-link-custom" href="#" data-section="playlists" onclick="switchSection('playlists')">Playlists</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link nav-link-custom" href="#" data-section="subscriptions" onclick="switchSection('subscriptions')">Subscriptions</a>
                 </li>
             </ul>
@@ -79,6 +82,13 @@
         <div id="sectionFeeds" class="flex-col flex-fill p-2">
             <div id="feedColumns" class="column-layout flex-fill scrollable-x">
                 <!-- Feed columns rendered here -->
+            </div>
+        </div>
+
+        <!-- Section: Playlists -->
+        <div id="sectionPlaylists" class="flex-col flex-fill p-2 d-none">
+            <div id="playlistColumns" class="column-layout flex-fill scrollable-x">
+                <!-- Playlist columns rendered here -->
             </div>
         </div>
     </div>
@@ -151,6 +161,29 @@
                         <button type="submit" class="btn btn-primary">Save</button>
                     </div>
                 </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Create/Edit Category -->
+    <div id="addToPlaylistModal" class="modal fade" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addToPlaylistModalTitle">Add to Playlist</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" onclick="clearPendingPlaylistVideo()"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-3">Add <strong id="addToPlaylistVideoTitle">video</strong> to:</p>
+                    <div class="mb-2">
+                        <select id="playlistSelect" class="form-select"></select>
+                    </div>
+                    <small class="text-muted d-block">Choose an existing YouTube playlist for this feed item.</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" onclick="clearPendingPlaylistVideo()">Cancel</button>
+                    <button type="button" id="addToPlaylistConfirmBtn" class="btn btn-primary" onclick="addVideoToPlaylist()">Add</button>
+                </div>
             </div>
         </div>
     </div>
@@ -234,6 +267,6 @@
 
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/static/app.js?v=20260328f"></script>
+    <script src="/static/app.js?v=20260328l"></script>
 </body>
 </html>

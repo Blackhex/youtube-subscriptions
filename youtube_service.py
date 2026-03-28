@@ -1,6 +1,8 @@
 import logging
 import os
 import re
+import ssl
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
@@ -297,6 +299,263 @@ class YouTubeService:
         logger.debug("Fetched video details for %s/%s videos", len(details), len(video_ids))
         return details
 
+    def fetch_owned_playlists(self) -> List[Dict[str, Any]]:
+        """Fetch all playlists owned by the authenticated user."""
+        logger.debug("Fetching owned YouTube playlists")
+        playlists: List[Dict[str, Any]] = []
+        next_page_token = None
+
+        while True:
+            response = self._execute_with_retry(
+                lambda: self.youtube.playlists()
+                .list(
+                    part="snippet,contentDetails,status",
+                    mine=True,
+                    maxResults=50,
+                    pageToken=next_page_token,
+                )
+                .execute(),
+                operation_name="fetch_owned_playlists",
+            )
+
+            for item in response.get("items", []):
+                snippet = item.get("snippet", {})
+                content_details = item.get("contentDetails", {})
+                status = item.get("status", {})
+                thumbnails = snippet.get("thumbnails", {})
+                thumbnail_url = (
+                    thumbnails.get("medium", {}).get("url")
+                    or thumbnails.get("standard", {}).get("url")
+                    or thumbnails.get("default", {}).get("url")
+                )
+                playlists.append(
+                    {
+                        "playlist_id": item.get("id"),
+                        "title": snippet.get("title", "Untitled playlist"),
+                        "description": snippet.get("description", ""),
+                        "channel_title": snippet.get("channelTitle", ""),
+                        "published_at": snippet.get("publishedAt"),
+                        "thumbnail_url": thumbnail_url,
+                        "item_count": content_details.get("itemCount", 0),
+                        "privacy_status": status.get("privacyStatus", "private"),
+                    }
+                )
+
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        logger.debug("Fetched owned playlists count=%s", len(playlists))
+        return playlists
+
+    def fetch_playlist_items(
+        self,
+        playlist_id: str,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict[str, Any]:
+        """Fetch items from a playlist using page-based pagination."""
+        if not playlist_id:
+            return {"items": [], "next_page_token": None, "page": page, "per_page": per_page, "total_results": 0}
+
+        page = max(1, page)
+        per_page = max(1, min(per_page, 50))
+        logger.debug(
+            "Fetching playlist items playlist_id=%s page=%s per_page=%s",
+            playlist_id,
+            page,
+            per_page,
+        )
+
+        next_page_token = None
+        response: Dict[str, Any] = {}
+
+        for current_page in range(1, page + 1):
+            page_token = next_page_token
+            request = self.youtube.playlistItems().list(
+                part="snippet,contentDetails",
+                playlistId=playlist_id,
+                maxResults=per_page,
+                pageToken=page_token,
+            )
+            response = self._execute_with_retry(
+                request.execute,
+                operation_name=f"fetch_playlist_items:{playlist_id}",
+            )
+            next_page_token = response.get("nextPageToken")
+            if current_page < page and not next_page_token:
+                logger.debug("Playlist page out of range playlist_id=%s requested_page=%s", playlist_id, page)
+                return {
+                    "items": [],
+                    "next_page_token": None,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_results": response.get("pageInfo", {}).get("totalResults", 0),
+                }
+
+        items: List[Dict[str, Any]] = []
+        for item in response.get("items", []):
+            snippet = item.get("snippet", {})
+            content_details = item.get("contentDetails", {})
+            thumbnails = snippet.get("thumbnails", {})
+            thumbnail_url = (
+                thumbnails.get("medium", {}).get("url")
+                or thumbnails.get("standard", {}).get("url")
+                or thumbnails.get("default", {}).get("url")
+            )
+            video_id = content_details.get("videoId") or snippet.get("resourceId", {}).get("videoId")
+            items.append(
+                {
+                    "playlist_item_id": item.get("id"),
+                    "video_id": video_id,
+                    "title": snippet.get("title", "Untitled video"),
+                    "channel_title": snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle", ""),
+                    "published_at": snippet.get("publishedAt"),
+                    "thumbnail_url": thumbnail_url,
+                    "position": snippet.get("position"),
+                }
+            )
+
+        logger.debug(
+            "Fetched playlist items playlist_id=%s item_count=%s next_page_token=%s",
+            playlist_id,
+            len(items),
+            bool(next_page_token),
+        )
+        return {
+            "items": items,
+            "next_page_token": next_page_token,
+            "page": page,
+            "per_page": per_page,
+            "total_results": response.get("pageInfo", {}).get("totalResults", len(items)),
+        }
+
+    def fetch_all_playlist_video_ids(self, playlist_id: str) -> List[str]:
+        """Fetch every video ID from a playlist."""
+        if not playlist_id:
+            return []
+
+        logger.debug("Fetching all playlist video IDs playlist_id=%s", playlist_id)
+        video_ids: List[str] = []
+        next_page_token = None
+
+        while True:
+            response = self._execute_with_retry(
+                lambda: self.youtube.playlistItems()
+                .list(
+                    part="contentDetails",
+                    playlistId=playlist_id,
+                    maxResults=50,
+                    pageToken=next_page_token,
+                )
+                .execute(),
+                operation_name=f"fetch_all_playlist_video_ids:{playlist_id}",
+            )
+
+            for item in response.get("items", []):
+                video_id = item.get("contentDetails", {}).get("videoId")
+                if video_id:
+                    video_ids.append(video_id)
+
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        logger.debug("Fetched playlist video ids playlist_id=%s count=%s", playlist_id, len(video_ids))
+        return video_ids
+
+    def delete_playlist_item(self, playlist_item_id: str) -> bool:
+        """Delete a single item from a playlist."""
+        if not playlist_item_id:
+            return False
+
+        logger.debug("Deleting playlist item playlist_item_id=%s", playlist_item_id)
+        try:
+            self._execute_with_retry(
+                lambda: self.youtube.playlistItems().delete(id=playlist_item_id).execute(),
+                operation_name=f"delete_playlist_item:{playlist_item_id}",
+            )
+            return True
+        except HttpError as error:
+            status = getattr(error.resp, "status", None)
+            if status == 404:
+                logger.debug("Playlist item already missing playlist_item_id=%s", playlist_item_id)
+                return True
+            logger.exception("Error deleting playlist item playlist_item_id=%s", playlist_item_id)
+            return False
+        except (ssl.SSLError, OSError):
+            logger.exception("Error deleting playlist item playlist_item_id=%s", playlist_item_id)
+            return False
+
+    def delete_playlist(self, playlist_id: str) -> bool:
+        """Delete a playlist owned by the authenticated user."""
+        if not playlist_id:
+            return False
+
+        logger.debug("Deleting playlist playlist_id=%s", playlist_id)
+        try:
+            self._execute_with_retry(
+                lambda: self.youtube.playlists().delete(id=playlist_id).execute(),
+                operation_name=f"delete_playlist:{playlist_id}",
+            )
+            return True
+        except HttpError as error:
+            status = getattr(error.resp, "status", None)
+            if status == 404:
+                logger.debug("Playlist already missing playlist_id=%s", playlist_id)
+                return True
+            logger.exception("Error deleting playlist playlist_id=%s", playlist_id)
+            return False
+        except (ssl.SSLError, OSError):
+            logger.exception("Error deleting playlist playlist_id=%s", playlist_id)
+            return False
+
+    @staticmethod
+    def _is_retryable_http_error(error: HttpError) -> bool:
+        """Return True for transient HTTP errors."""
+        status = getattr(error.resp, "status", None)
+        return status in {408, 429, 500, 502, 503, 504}
+
+    def _execute_with_retry(self, executor, operation_name: str, retries: int = 3, initial_delay: float = 0.75):
+        """Execute a YouTube API call with retries for transient transport failures."""
+        delay = initial_delay
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                return executor()
+            except HttpError as error:
+                last_error = error
+                if attempt >= retries or not self._is_retryable_http_error(error):
+                    raise
+                logger.warning(
+                    "Transient YouTube HTTP error during %s attempt=%s/%s status=%s; retrying in %.2fs",
+                    operation_name,
+                    attempt,
+                    retries,
+                    getattr(error.resp, "status", None),
+                    delay,
+                )
+            except (ssl.SSLError, OSError) as error:
+                last_error = error
+                if attempt >= retries:
+                    raise
+                logger.warning(
+                    "Transient transport error during %s attempt=%s/%s error=%s; retrying in %.2fs",
+                    operation_name,
+                    attempt,
+                    retries,
+                    error,
+                    delay,
+                )
+
+            time.sleep(delay)
+            delay *= 2
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"YouTube operation failed: {operation_name}")
+
     def fetch_watch_progress(self, target_video_ids: List[str], max_pages: int = 5) -> Dict[str, int]:
         """Fetch watch progress from YouTube's InnerTube API.
 
@@ -475,6 +734,76 @@ class YouTubeService:
 
         logger.debug("Added %s videos to playlist_id=%s", added, playlist_id)
         return added
+
+    def fetch_all_playlist_items(self, playlist_id: str) -> List[Dict[str, Any]]:
+        """Fetch every item in a playlist, preserving YouTube order."""
+        if not playlist_id:
+            return []
+
+        logger.debug("Fetching all playlist items playlist_id=%s", playlist_id)
+        items: List[Dict[str, Any]] = []
+        next_page_token = None
+
+        while True:
+            response = self._execute_with_retry(
+                lambda: self.youtube.playlistItems()
+                .list(
+                    part="snippet,contentDetails",
+                    playlistId=playlist_id,
+                    maxResults=50,
+                    pageToken=next_page_token,
+                )
+                .execute(),
+                operation_name=f"fetch_all_playlist_items:{playlist_id}",
+            )
+
+            for item in response.get("items", []):
+                snippet = item.get("snippet", {})
+                content_details = item.get("contentDetails", {})
+                items.append(
+                    {
+                        "playlist_item_id": item.get("id"),
+                        "video_id": content_details.get("videoId") or snippet.get("resourceId", {}).get("videoId"),
+                        "position": snippet.get("position"),
+                    }
+                )
+
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        logger.debug("Fetched all playlist items playlist_id=%s count=%s", playlist_id, len(items))
+        return items
+
+    def update_playlist_item_position(
+        self,
+        playlist_item_id: str,
+        playlist_id: str,
+        video_id: str,
+        position: int,
+    ) -> None:
+        """Update the position of a playlist item."""
+        logger.debug(
+            "Updating playlist item position playlist_item_id=%s playlist_id=%s video_id=%s position=%s",
+            playlist_item_id,
+            playlist_id,
+            video_id,
+            position,
+        )
+        self.youtube.playlistItems().update(
+            part="snippet",
+            body={
+                "id": playlist_item_id,
+                "snippet": {
+                    "playlistId": playlist_id,
+                    "position": position,
+                    "resourceId": {
+                        "kind": "youtube#video",
+                        "videoId": video_id,
+                    },
+                },
+            },
+        ).execute()
 
     def unsubscribe_from_channel(self, subscription_id: str) -> bool:
         """Delete a subscription from YouTube.

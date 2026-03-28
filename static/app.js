@@ -10,9 +10,16 @@ let currentSearchQuery = "";
 let suggestedCategoryIds = [];
 let subscriptionsLoadingMore = false;
 const feedVideoPagination = {};
+const playlistVideoPagination = {};
 let allQueueItems = [];
+let allPlaylists = [];
+let playlistItemsLoading = false;
 let queuePlaybackActive = false;
 let queueSyncInterval = null;
+let pendingPlaylistVideo = null;
+let draggedPlaylistItemId = null;
+let draggedPlaylistId = null;
+let draggedQueueItemId = null;
 const CAST_APPLICATION_ID = window.CAST_APPLICATION_ID || "233637DE";
 const YOUTUBE_MDX_NAMESPACE = "urn:x-cast:com.google.youtube.mdx";
 let castContext = null;
@@ -122,6 +129,15 @@ function ensureLoadMoreIndicator(container) {
   return indicator;
 }
 
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
 function setLoadMoreIndicator(container, isVisible) {
   if (!container) {
     return;
@@ -141,6 +157,18 @@ function getFeedVideoPagination(feedId) {
   }
 
   return feedVideoPagination[feedId];
+}
+
+function getPlaylistVideoPagination(playlistId) {
+  if (!playlistVideoPagination[playlistId]) {
+    playlistVideoPagination[playlistId] = {
+      page: 1,
+      hasMore: false,
+      loading: false,
+    };
+  }
+
+  return playlistVideoPagination[playlistId];
 }
 
 function resetScrollSentinel(container) {
@@ -614,10 +642,27 @@ function collectOrderedIds(container) {
     .map((node) => Number(node.dataset.categoryId));
 }
 
+function collectOrderedPlaylistItemIds(container) {
+  const items = Array.from(container.querySelectorAll(":scope > .playlist-item[data-playlist-item-id]"));
+  return items.map((item) => item.dataset.playlistItemId).filter(Boolean);
+}
+
+function collectOrderedQueueItemIds(container) {
+  const items = Array.from(container.querySelectorAll(":scope > .queue-item[data-queue-item-id]"));
+  return items.map((item) => item.dataset.queueItemId).filter(Boolean);
+}
+
 async function persistCategoryOrder(parentId, orderedIds) {
   await fetchAPI("/categories/reorder", {
     method: "POST",
     body: JSON.stringify({ parent_id: parentId, ordered_ids: orderedIds }),
+  });
+}
+
+async function persistQueueOrder(orderedIds) {
+  return fetchAPI("/queue/reorder", {
+    method: "POST",
+    body: JSON.stringify({ queue_item_ids: orderedIds }),
   });
 }
 
@@ -1212,6 +1257,7 @@ function renderQueue() {
   }
 
   container.innerHTML = allQueueItems.map((item, index) => renderQueueItem(item, index)).join("");
+  attachQueueDragHandlers(container);
   applyWatchedState(container, allQueueItems.map((item) => item.video).filter(Boolean));
 }
 
@@ -1219,12 +1265,15 @@ function renderQueueItem(item, index) {
   const video = item.video || {};
   if (!video.video_id) {
     return `
-      <div class="list-item list-item-spacious video-item queue-item watched" data-queue-item-id="${item.id}">
+      <div class="list-item video-item queue-item watched" draggable="true" data-queue-item-id="${item.id}">
         <div class="list-item-info">
           <div class="list-item-title">Unavailable video</div>
           <div class="list-item-subtitle">This queue entry no longer has a matching video record.</div>
         </div>
-        <div class="action-group">
+        <div class="action-group video-item-actions-below">
+          <button class="btn-action playlist-drag-handle" type="button" title="Drag to reorder" aria-label="Drag to reorder">
+            <span class="material-icons">drag_indicator</span>
+          </button>
           <button class="btn-action btn-action-danger btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); removeQueueItem(${item.id})" title="Remove from queue">
             <span class="material-icons">close</span>
           </button>
@@ -1238,6 +1287,7 @@ function renderQueueItem(item, index) {
     showRemoveAction: true,
     queueItemId: item.id,
     extraClass: "queue-item",
+    enableQueueReorder: true,
   });
 }
 
@@ -1263,6 +1313,77 @@ async function removeQueueItem(queueItemId) {
   } catch (error) {
     showToast(`Error removing queue item: ${error.message}`, "error");
   }
+}
+
+function attachQueueDragHandlers(container) {
+  if (!container || container.dataset.dragBound === "true") {
+    return;
+  }
+
+  container.dataset.dragBound = "true";
+
+  container.addEventListener("dragstart", (event) => {
+    const item = event.target.closest(".queue-item[data-queue-item-id]");
+    if (!item) {
+      return;
+    }
+
+    draggedQueueItemId = item.dataset.queueItemId;
+    item.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedQueueItemId);
+  });
+
+  container.addEventListener("dragover", (event) => {
+    const target = event.target.closest(".queue-item[data-queue-item-id]");
+    if (!target || !draggedQueueItemId) {
+      return;
+    }
+
+    event.preventDefault();
+    target.classList.add("drop-target");
+  });
+
+  container.addEventListener("dragleave", (event) => {
+    const target = event.target.closest(".queue-item[data-queue-item-id]");
+    if (target) {
+      target.classList.remove("drop-target");
+    }
+  });
+
+  container.addEventListener("dragend", () => {
+    container.querySelectorAll(".queue-item").forEach((item) => {
+      item.classList.remove("dragging", "drop-target");
+    });
+    draggedQueueItemId = null;
+  });
+
+  container.addEventListener("drop", async (event) => {
+    const target = event.target.closest(".queue-item[data-queue-item-id]");
+    if (!target || !draggedQueueItemId) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const draggedItem = container.querySelector(`[data-queue-item-id="${CSS.escape(draggedQueueItemId)}"]`);
+    if (!draggedItem || draggedItem === target) {
+      return;
+    }
+
+    container.insertBefore(draggedItem, target);
+
+    const orderedIds = collectOrderedQueueItemIds(container);
+    try {
+      const result = await persistQueueOrder(orderedIds);
+      allQueueItems = result.items || allQueueItems;
+      renderQueue();
+      showToast("Queue order updated", "success");
+    } catch (error) {
+      showToast(`Error updating queue order: ${error.message}`, "error");
+      await loadQueue();
+    }
+  });
 }
 
 async function createPlaylistFromQueue() {
@@ -1563,7 +1684,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function switchSection(section) {
   document.getElementById("sectionSubscriptions").classList.toggle("d-none", section !== "subscriptions");
-  document.getElementById("sectionFeeds").classList.toggle("d-none", section === "subscriptions");
+  document.getElementById("sectionPlaylists").classList.toggle("d-none", section !== "playlists");
+  document.getElementById("sectionFeeds").classList.toggle("d-none", section !== "feeds");
 
   document.querySelectorAll("#mainNav .nav-link").forEach(link => {
     link.classList.toggle("active", link.dataset.section === section);
@@ -1577,6 +1699,11 @@ function switchSection(section) {
     newCategoryBtn.classList.add("d-none");
     if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
     loadFeeds();
+  } else if (section === "playlists") {
+    newFeedBtn.classList.add("d-none");
+    newCategoryBtn.classList.add("d-none");
+    if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
+    loadPlaylists();
   } else {
     newFeedBtn.classList.add("d-none");
     newCategoryBtn.classList.remove("d-none");
@@ -1642,15 +1769,15 @@ function renderFeedColumns() {
 function renderQueueColumn() {
   return `
     <div class="column-item flex-col flex-noshrink" data-column-type="queue">
-      <div class="card queue-card">
+      <div class="card">
         <div class="card-header">
           <h6 class="mb-0 fw-semibold">Queue</h6>
           <div id="queueToolbarActions" class="action-group">
-            <span id="castReceiverStatus" class="queue-receiver-status text-muted small d-none d-md-inline"></span>
-            <button class="btn-action queue-toolbar-btn" onclick="createPlaylistFromQueue()" title="Create YouTube playlist from queue" aria-label="Create YouTube playlist from queue">
+            <span id="castReceiverStatus" class="text-muted small d-none d-md-inline"></span>
+            <button class="btn-action" onclick="createPlaylistFromQueue()" title="Create YouTube playlist from queue" aria-label="Create YouTube playlist from queue">
               <span class="material-icons">playlist_add</span>
             </button>
-            <button class="btn-action queue-toolbar-btn" onclick="castQueue()" title="Select a Google Cast receiver and start playback" aria-label="Select a Google Cast receiver and start playback">
+            <button class="btn-action" onclick="castQueue()" title="Select a Google Cast receiver and start playback" aria-label="Select a Google Cast receiver and start playback">
               <span class="material-icons">cast</span>
             </button>
           </div>
@@ -1722,7 +1849,31 @@ function renderVideoItem(v, options = {}) {
   const showQueueAction = options.showQueueAction !== false;
   const actionButtons = [];
 
-  if (showQueueAction) {
+  if (options.enableQueueReorder && options.queueItemId) {
+    actionButtons.push(`
+      <button class="btn-action playlist-drag-handle" type="button" title="Drag to reorder" aria-label="Drag to reorder">
+        <span class="material-icons">drag_indicator</span>
+      </button>
+    `);
+  }
+
+  if (options.enablePlaylistReorder && v.playlist_item_id) {
+    actionButtons.push(`
+      <button class="btn-action playlist-drag-handle" type="button" title="Drag to reorder" aria-label="Drag to reorder">
+        <span class="material-icons">drag_indicator</span>
+      </button>
+    `);
+  }
+
+  if (options.showPlaylistAction && v.video_id) {
+    actionButtons.push(`
+      <button class="btn-action btn-action-reveal" type="button" data-action="add-to-playlist" data-video-id="${v.video_id}" data-video-title="${encodeURIComponent(v.title || "video")}" title="Add to playlist">
+        <span class="material-icons">playlist_add_check</span>
+      </button>
+    `);
+  }
+
+  if (showQueueAction && v.video_id) {
     actionButtons.push(`
       <button class="btn-action btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); addVideoToQueue('${v.video_id}')" title="Add to queue">
         <span class="material-icons">playlist_add</span>
@@ -1730,30 +1881,65 @@ function renderVideoItem(v, options = {}) {
     `);
   }
 
-  if (options.showRemoveAction && options.queueItemId) {
+  const removeActionOnclick = options.removeActionOnclick || (
+    options.queueItemId !== undefined && options.queueItemId !== null
+      ? `event.preventDefault(); event.stopPropagation(); removeQueueItem(${options.queueItemId})`
+      : ""
+  );
+
+  if (options.showRemoveAction && removeActionOnclick) {
     actionButtons.push(`
-      <button class="btn-action btn-action-danger btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); removeQueueItem(${options.queueItemId})" title="Remove from queue">
+      <button class="btn-action btn-action-danger btn-action-reveal" onclick="${removeActionOnclick}" title="Remove">
         <span class="material-icons">close</span>
       </button>
     `);
   }
 
+  if (!v.video_id) {
+    return `
+      <div class="list-item video-item ${options.extraClass || ""} video-item-stack ${options.enablePlaylistReorder ? "playlist-item" : ""} ${options.enableQueueReorder ? "queue-item" : ""}" ${(options.enablePlaylistReorder && v.playlist_item_id) ? `draggable="true" data-playlist-item-id="${v.playlist_item_id}" data-playlist-id="${options.playlistId || ""}"` : ""} ${(options.enableQueueReorder && options.queueItemId) ? `draggable="true" data-queue-item-id="${options.queueItemId}"` : ""} data-video-id="">
+        <div class="video-item-content">
+          <div class="thumb-stack">
+            <div class="thumb-container">
+              <div class="list-item-thumb list-item-thumb-lg bg-light d-flex align-items-center justify-content-center text-muted">
+                <span class="material-icons">videocam_off</span>
+              </div>
+            </div>
+            <div class="action-group video-item-actions video-item-actions-below">
+              ${actionButtons.join("")}
+            </div>
+          </div>
+          <div class="list-item-info">
+            <div class="list-item-title">Unavailable video</div>
+            <div class="list-item-subtitle">This item no longer has an available video record.</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   return `
-    <div class="list-item list-item-spacious video-item ${options.extraClass || ""}" data-video-id="${v.video_id}">
-      <a class="video-item-link flex-fill d-flex align-items-center gap-2 text-decoration-none text-reset" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener">
-        <div class="thumb-container">
-          <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
-          ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
-          ${typeof v.playback_progress === "number" ? `<div class="progress-bar-container"><div class="progress-bar-fill" style="width:${Math.max(0, Math.min(100, v.playback_progress))}%"></div></div>` : ''}
+    <div class="list-item video-item ${options.extraClass || ""} video-item-stack ${options.enablePlaylistReorder ? "playlist-item" : ""} ${options.enableQueueReorder ? "queue-item" : ""}" ${(options.enablePlaylistReorder && v.playlist_item_id) ? `draggable="true" data-playlist-item-id="${v.playlist_item_id}" data-playlist-id="${options.playlistId || ""}"` : ""} ${(options.enableQueueReorder && options.queueItemId) ? `draggable="true" data-queue-item-id="${options.queueItemId}"` : ""} data-video-id="${v.video_id}">
+      <div class="video-item-content">
+        <div class="thumb-stack">
+          <a class="video-item-link video-item-media-link text-decoration-none text-reset" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener">
+            <div class="thumb-container">
+              <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
+              ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
+              ${typeof v.playback_progress === "number" ? `<div class="progress-bar-container"><div class="progress-bar-fill" style="width:${Math.max(0, Math.min(100, v.playback_progress))}%"></div></div>` : ''}
+            </div>
+          </a>
+          <div class="action-group video-item-actions video-item-actions-below">
+            ${actionButtons.join("")}
+          </div>
         </div>
-        <div class="list-item-info">
-          <div class="list-item-title">${v.title}</div>
-          <div class="list-item-subtitle">${v.channel_title || ''}</div>
-          <div class="list-item-meta">${v.published_at ? timeAgo(v.published_at) : ''}</div>
-        </div>
-      </a>
-      <div class="action-group video-item-actions">
-        ${actionButtons.join("")}
+        <a class="video-item-link flex-fill d-flex flex-column text-decoration-none text-reset" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener">
+          <div class="list-item-info">
+            <div class="list-item-title">${escapeHtml(v.title || "Untitled video")}</div>
+            <div class="list-item-subtitle">${escapeHtml(v.channel_title || "")}</div>
+            <div class="list-item-meta">${v.published_at ? escapeHtml(timeAgo(v.published_at)) : ''}</div>
+          </div>
+        </a>
       </div>
     </div>
   `;
@@ -1793,6 +1979,450 @@ function renderVideoListContainer(videos, loadMoreEnabled, options = {}) {
   return listHtml + sentinelHtml;
 }
 
+async function ensurePlaylistsLoaded() {
+  if (allPlaylists.length) {
+    return;
+  }
+
+  const data = await fetchAPI("/playlists");
+  allPlaylists = data.items || [];
+}
+
+function renderPlaylistSelectOptions() {
+  if (!allPlaylists.length) {
+    return '<option value="">No playlists available</option>';
+  }
+
+  return ["<option value=\"\">Select a playlist</option>"]
+    .concat(allPlaylists.map((playlist) => `<option value="${playlist.playlist_id}">${playlist.title}</option>`))
+    .join("");
+}
+
+async function openAddToPlaylistModal(videoId, videoTitle = "video") {
+  try {
+    showSpinner();
+    pendingPlaylistVideo = { videoId, videoTitle };
+    await ensurePlaylistsLoaded();
+
+    const modalTitle = document.getElementById("addToPlaylistModalTitle");
+    const videoLabel = document.getElementById("addToPlaylistVideoTitle");
+    const playlistSelect = document.getElementById("playlistSelect");
+    const confirmButton = document.getElementById("addToPlaylistConfirmBtn");
+
+    if (!modalTitle || !videoLabel || !playlistSelect || !confirmButton) {
+      throw new Error("Playlist picker modal is missing");
+    }
+
+    modalTitle.textContent = "Add to Playlist";
+    videoLabel.textContent = videoTitle;
+    playlistSelect.innerHTML = renderPlaylistSelectOptions();
+    playlistSelect.value = "";
+    confirmButton.disabled = !allPlaylists.length;
+
+    showModal("addToPlaylistModal");
+  } catch (error) {
+    pendingPlaylistVideo = null;
+    showToast(`Error opening playlist picker: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function addVideoToPlaylist() {
+  try {
+    if (!pendingPlaylistVideo) {
+      throw new Error("No video selected");
+    }
+
+    const playlistSelect = document.getElementById("playlistSelect");
+    if (!playlistSelect || !playlistSelect.value) {
+      throw new Error("Select a playlist first");
+    }
+
+    const playlistId = playlistSelect.value;
+    const playlistTitle = allPlaylists.find((playlist) => playlist.playlist_id === playlistId)?.title || "playlist";
+
+    showSpinner();
+    const result = await fetchAPI(`/playlists/${playlistId}/items`, {
+      method: "POST",
+      body: JSON.stringify({ video_id: pendingPlaylistVideo.videoId }),
+    });
+
+    hideModal("addToPlaylistModal");
+    pendingPlaylistVideo = null;
+    showToast(result.added_count ? `Added to ${playlistTitle}` : "Video was not added to the playlist", result.added_count ? "success" : "info");
+  } catch (error) {
+    showToast(`Error adding video to playlist: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-action='add-to-playlist']");
+  if (!button) {
+    const playlistButton = event.target.closest("[data-playlist-action]");
+    if (!playlistButton) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const playlistAction = playlistButton.dataset.playlistAction;
+    const playlistId = playlistButton.dataset.playlistId;
+    const playlistTitle = playlistButton.dataset.playlistTitle ? decodeURIComponent(playlistButton.dataset.playlistTitle) : "playlist";
+
+    if (playlistAction === "cast") {
+      castPlaylist(playlistId);
+    } else if (playlistAction === "delete") {
+      deletePlaylist(playlistId, playlistTitle);
+    }
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const videoId = button.dataset.videoId;
+  const videoTitle = button.dataset.videoTitle ? decodeURIComponent(button.dataset.videoTitle) : "video";
+  openAddToPlaylistModal(videoId, videoTitle);
+});
+
+function clearPendingPlaylistVideo() {
+  pendingPlaylistVideo = null;
+}
+
+async function loadPlaylists() {
+  try {
+    showSpinner();
+    const data = await fetchAPI("/playlists");
+    allPlaylists = data.items || [];
+    renderPlaylists();
+    loadPlaylistItemsSequentially();
+  } catch (error) {
+    showToast(`Error loading playlists: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+function renderPlaylists() {
+  const container = document.getElementById("playlistColumns");
+  if (!container) {
+    return;
+  }
+
+  if (!allPlaylists.length) {
+    container.innerHTML = `
+      <div class="column-item flex-col flex-noshrink">
+        <div class="card flex-fill">
+          <div class="empty-state flex-fill d-flex flex-column justify-content-center align-items-center">
+            <p>No playlists found.</p>
+            <button class="btn btn-primary btn-sm" onclick="loadPlaylists()">Refresh from YouTube</button>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = allPlaylists.map((playlist) => `
+    <div class="column-item flex-col flex-noshrink" data-playlist-id="${playlist.playlist_id}">
+      <div class="card">
+        <div class="card-header">
+          <div class="d-flex flex-column flex-fill me-2">
+            <h6 class="mb-0 fw-semibold text-truncate" title="${escapeHtml(playlist.title)}">${escapeHtml(playlist.title)}</h6>
+            <div class="text-muted small text-truncate">${playlist.item_count || 0} items${playlist.privacy_status ? ` • ${escapeHtml(playlist.privacy_status)}` : ""}</div>
+          </div>
+          <div class="action-group">
+            <button class="btn-action" type="button" data-playlist-action="cast" data-playlist-id="${playlist.playlist_id}" title="Cast playlist"><span class="material-icons">cast</span></button>
+            <button class="btn-action btn-action-danger" type="button" data-playlist-action="delete" data-playlist-id="${playlist.playlist_id}" data-playlist-title="${encodeURIComponent(playlist.title || "Playlist")}" title="Delete playlist"><span class="material-icons">delete</span></button>
+          </div>
+        </div>
+        <div class="flex-fill scrollable p-2" id="playlistItems-${playlist.playlist_id}">
+          <div class="text-center p-3 text-muted small">Loading...</div>
+        </div>
+      </div>
+    </div>
+  `).join("");
+
+}
+
+async function loadPlaylistItemsSequentially() {
+  if (playlistItemsLoading || !allPlaylists.length) {
+    return;
+  }
+
+  playlistItemsLoading = true;
+  try {
+    for (const playlist of allPlaylists) {
+      await loadPlaylistItems(playlist.playlist_id);
+    }
+  } finally {
+    playlistItemsLoading = false;
+  }
+}
+
+function renderPlaylistItemsContainer(playlistId, items, loadMoreEnabled) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const listHtml = safeItems.map((item) => renderVideoItem(item, {
+    showQueueAction: false,
+    showRemoveAction: true,
+    removeActionOnclick: `event.preventDefault(); event.stopPropagation(); removePlaylistItem('${playlistId}', '${item.playlist_item_id}')`,
+    extraClass: "playlist-item",
+    enablePlaylistReorder: true,
+    playlistId,
+  })).join("");
+  const sentinelHtml = loadMoreEnabled
+    ? `<div class="load-more-indicator d-none"><div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span>Loading more</span></div>`
+    : "";
+  return listHtml + sentinelHtml;
+}
+
+function attachPlaylistDragHandlers(container, playlistId) {
+  if (!container || container.dataset.dragBound === "true") {
+    return;
+  }
+
+  container.dataset.dragBound = "true";
+
+  container.addEventListener("dragstart", (event) => {
+    const item = event.target.closest(".playlist-item[data-playlist-item-id]");
+    if (!item || item.dataset.playlistId !== playlistId) {
+      return;
+    }
+
+    draggedPlaylistItemId = item.dataset.playlistItemId;
+    draggedPlaylistId = item.dataset.playlistId;
+    item.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedPlaylistItemId);
+  });
+
+  container.addEventListener("dragover", (event) => {
+    const target = event.target.closest(".playlist-item[data-playlist-item-id]");
+    if (!target || target.dataset.playlistId !== draggedPlaylistId || !draggedPlaylistItemId) {
+      return;
+    }
+
+    event.preventDefault();
+    target.classList.add("drop-target");
+  });
+
+  container.addEventListener("dragleave", (event) => {
+    const target = event.target.closest(".playlist-item[data-playlist-item-id]");
+    if (target) {
+      target.classList.remove("drop-target");
+    }
+  });
+
+  container.addEventListener("dragend", () => {
+    container.querySelectorAll(".playlist-item").forEach((item) => {
+      item.classList.remove("dragging", "drop-target");
+    });
+    draggedPlaylistItemId = null;
+    draggedPlaylistId = null;
+  });
+
+  container.addEventListener("drop", async (event) => {
+    const target = event.target.closest(".playlist-item[data-playlist-item-id]");
+    if (!target || !draggedPlaylistItemId || target.dataset.playlistId !== draggedPlaylistId) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const draggedItem = container.querySelector(`[data-playlist-item-id="${CSS.escape(draggedPlaylistItemId)}"]`);
+    if (!draggedItem || draggedItem === target) {
+      return;
+    }
+
+    container.insertBefore(draggedItem, target);
+
+    const orderedIds = collectOrderedPlaylistItemIds(container);
+    try {
+      await persistPlaylistOrder(playlistId, orderedIds);
+      await loadPlaylistItems(playlistId);
+      showToast("Playlist order updated", "success");
+    } catch (error) {
+      showToast(`Error updating playlist order: ${error.message}`, "error");
+      await loadPlaylistItems(playlistId);
+    }
+  });
+}
+
+async function persistPlaylistOrder(playlistId, orderedIds) {
+  await fetchAPI(`/playlists/${playlistId}/items/reorder`, {
+    method: "POST",
+    body: JSON.stringify({ playlist_item_ids: orderedIds }),
+  });
+}
+
+async function loadPlaylistItems(playlistId) {
+  try {
+    const pagination = getPlaylistVideoPagination(playlistId);
+    pagination.page = 1;
+    pagination.hasMore = false;
+    pagination.loading = false;
+    const data = await fetchAPI(`/playlists/${playlistId}/items?page=1&per_page=20`);
+    const container = document.getElementById(`playlistItems-${playlistId}`);
+    if (!container) return;
+
+    const items = Array.isArray(data.items) ? data.items : [];
+
+    if (!items.length) {
+      container.innerHTML = `<div class="text-center p-3 text-muted small">No videos in this playlist.</div>`;
+      return;
+    }
+
+    container.innerHTML = renderPlaylistItemsContainer(playlistId, items, data.has_more);
+    pagination.hasMore = data.has_more;
+
+    applyWatchedState(container, items);
+    attachPlaylistDragHandlers(container, playlistId);
+
+    bindAutoLoadOnScroll(
+      container,
+      () => loadMorePlaylistItems(playlistId),
+      () => getPlaylistVideoPagination(playlistId).hasMore,
+      () => getPlaylistVideoPagination(playlistId).loading
+    );
+  } catch (error) {
+    const container = document.getElementById(`playlistItems-${playlistId}`);
+    if (container) {
+      container.innerHTML = `<div class="text-center p-2 text-danger small">Error loading playlist items</div>`;
+    }
+  }
+}
+
+async function loadMorePlaylistItems(playlistId) {
+  try {
+    const pagination = getPlaylistVideoPagination(playlistId);
+    if (pagination.loading || !pagination.hasMore) {
+      return;
+    }
+
+    pagination.loading = true;
+    const container = document.getElementById(`playlistItems-${playlistId}`);
+    setLoadMoreIndicator(container, true);
+    const page = (pagination.page || 1) + 1;
+    const data = await fetchAPI(`/playlists/${playlistId}/items?page=${page}&per_page=20`);
+    if (!container) return;
+
+    const oldIndicator = container.querySelector('.load-more-indicator');
+    if (oldIndicator) oldIndicator.remove();
+
+    const fragment = document.createElement("div");
+    const items = Array.isArray(data.items) ? data.items : [];
+    fragment.innerHTML = items.map((item) => renderVideoItem(item, {
+      showQueueAction: false,
+      showRemoveAction: true,
+      removeActionOnclick: `event.preventDefault(); event.stopPropagation(); removePlaylistItem('${playlistId}', '${item.playlist_item_id}')`,
+      extraClass: "playlist-item",
+      enablePlaylistReorder: true,
+      playlistId,
+    })).join("");
+    while (fragment.firstChild) {
+      container.appendChild(fragment.firstChild);
+    }
+
+    if (data.has_more) {
+      setLoadMoreIndicator(container, false);
+    } else {
+      resetScrollSentinel(container);
+    }
+    pagination.hasMore = data.has_more;
+    pagination.page = page;
+
+    applyWatchedState(container, items);
+    attachPlaylistDragHandlers(container, playlistId);
+  } catch (error) {
+    showToast("Error loading more playlist items", "error");
+  } finally {
+    const container = document.getElementById(`playlistItems-${playlistId}`);
+    if (container) {
+      if (getPlaylistVideoPagination(playlistId).hasMore) {
+        setLoadMoreIndicator(container, false);
+      } else {
+        resetScrollSentinel(container);
+      }
+    }
+    getPlaylistVideoPagination(playlistId).loading = false;
+  }
+}
+
+async function removePlaylistItem(playlistId, playlistItemId) {
+  try {
+    showSpinner();
+    await fetchAPI(`/playlists/${playlistId}/items/${playlistItemId}`, { method: "DELETE" });
+    await loadPlaylistItems(playlistId);
+    showToast("Playlist item removed", "success");
+  } catch (error) {
+    showToast(`Error removing playlist item: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function deletePlaylist(playlistId, playlistTitle = "playlist") {
+  if (!await showConfirm(`Delete ${playlistTitle} from YouTube?`, "Delete Playlist")) {
+    return;
+  }
+
+  try {
+    showSpinner();
+    await fetchAPI(`/playlists/${playlistId}`, { method: "DELETE" });
+    allPlaylists = allPlaylists.filter((playlist) => playlist.playlist_id !== playlistId);
+    const playlistColumn = document.querySelector(`[data-playlist-id="${CSS.escape(playlistId)}"]`);
+    if (playlistColumn) {
+      playlistColumn.remove();
+    }
+    if (allPlaylists.length === 0) {
+      renderPlaylists();
+    }
+    showToast("Playlist deleted", "success");
+  } catch (error) {
+    showToast(`Error deleting playlist: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function castPlaylist(playlistId) {
+  try {
+    showSpinner();
+    initializeCastFramework();
+    const session = await requestCastSession();
+    const screenId = _receiverScreenId || await getYouTubeScreenId(session);
+    const result = await fetchAPI(`/playlists/${playlistId}/cast`, {
+      method: "POST",
+      body: JSON.stringify({ screen_id: screenId }),
+    });
+
+    if (result.error) {
+      throw new Error(result.error);
+    }
+
+    const deviceName = session.getCastDevice ? session.getCastDevice()?.friendlyName : null;
+    updateCastReceiverStatus();
+    showToast(
+      result.video_count
+        ? (deviceName
+          ? `Playing ${result.video_count} videos on ${deviceName}`
+          : `Playing ${result.video_count} videos via Cast`)
+        : (deviceName
+          ? `Playing playlist on ${deviceName}`
+          : "Playing playlist via Cast"),
+      "success"
+    );
+  } catch (error) {
+    showToast(`Error starting playlist playback: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
 async function loadFeedVideos(feedId) {
   try {
     const pagination = getFeedVideoPagination(feedId);
@@ -1808,7 +2438,7 @@ async function loadFeedVideos(feedId) {
       return;
     }
 
-    container.innerHTML = renderVideoListContainer(data.items, data.has_more, { showQueueAction: true });
+    container.innerHTML = renderVideoListContainer(data.items, data.has_more, { showQueueAction: true, showPlaylistAction: true });
     pagination.hasMore = data.has_more;
 
     applyWatchedState(container, data.items);
@@ -1844,7 +2474,7 @@ async function loadMoreFeedVideos(feedId) {
 
     // Append new videos
     const fragment = document.createElement('div');
-    fragment.innerHTML = data.items.map((video) => renderVideoItem(video, { showQueueAction: true })).join("");
+    fragment.innerHTML = data.items.map((video) => renderVideoItem(video, { showQueueAction: true, showPlaylistAction: true })).join("");
     while (fragment.firstChild) container.appendChild(fragment.firstChild);
 
     // Keep the spinner indicator available only while more pages remain
