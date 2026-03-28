@@ -430,6 +430,52 @@ class YouTubeService:
 
         return tiles, continuation_token
 
+    def create_playlist(self, title: str, description: str = "") -> str:
+        """Create a private YouTube playlist and return its ID."""
+        logger.debug("Creating YouTube playlist title=%s", title)
+        response = self.youtube.playlists().insert(
+            part="snippet,status",
+            body={
+                "snippet": {
+                    "title": title,
+                    "description": description,
+                },
+                "status": {
+                    "privacyStatus": "private",
+                },
+            },
+        ).execute()
+        playlist_id = response.get("id")
+        if not playlist_id:
+            raise RuntimeError("Playlist creation returned no ID")
+        logger.debug("Created YouTube playlist id=%s", playlist_id)
+        return playlist_id
+
+    def add_videos_to_playlist(self, playlist_id: str, video_ids: List[str]) -> int:
+        """Add videos to a YouTube playlist in order and return the count added."""
+        if not playlist_id or not video_ids:
+            return 0
+
+        added = 0
+        for video_id in video_ids:
+            logger.debug("Adding video to playlist playlist_id=%s video_id=%s", playlist_id, video_id)
+            self.youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video_id,
+                        },
+                    }
+                },
+            ).execute()
+            added += 1
+
+        logger.debug("Added %s videos to playlist_id=%s", added, playlist_id)
+        return added
+
     def unsubscribe_from_channel(self, subscription_id: str) -> bool:
         """Delete a subscription from YouTube.
         
@@ -447,3 +493,208 @@ class YouTubeService:
         except HttpError:
             logger.exception("Error unsubscribing from subscription_id=%s", subscription_id)
             return False
+
+    # region Cast via YouTube Lounge API
+
+    _LOUNGE_BASE = "https://www.youtube.com/"
+    _LOUNGE_TOKEN_URL = _LOUNGE_BASE + "api/lounge/pairing/get_lounge_token_batch"
+    _LOUNGE_BIND_URL = _LOUNGE_BASE + "api/lounge/bc/bind"
+    _LOUNGE_HEADERS = {
+        "Origin": "https://www.youtube.com/",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    _LOUNGE_ID_HEADER = "X-YouTube-LoungeId-Token"
+    _LOUNGE_BIND_DATA = {
+        "device": "REMOTE_CONTROL",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "YTSubsOrganizer",
+        "mdx-version": 3,
+        "pairing_type": "cast",
+        "app": "android-phone-13.14.55",
+    }
+
+    def cast_to_receiver(
+        self,
+        screen_id: str,
+        video_id: str,
+        playlist_id: str = "",
+        video_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Start playback on a YouTube Cast receiver via the Lounge API.
+
+        Returns a dict with session identifiers that must be passed to subsequent
+        commands (e.g. ``send_lounge_command``).
+        """
+        logger.debug(
+            "cast_to_receiver screen_id=%s video_id=%s playlist_id=%s video_ids=%s",
+            screen_id, video_id, playlist_id, video_ids,
+        )
+
+        # Step 1 – obtain a lounge token for the screen
+        logger.debug("Lounge: requesting lounge token for screen_id=%s", screen_id)
+        token_resp = http_requests.post(
+            self._LOUNGE_TOKEN_URL,
+            data={"screen_ids": screen_id},
+            headers=self._LOUNGE_HEADERS,
+            timeout=10,
+        )
+        logger.debug(
+            "Lounge: token response status=%s body=%s",
+            token_resp.status_code, token_resp.text[:500],
+        )
+        token_resp.raise_for_status()
+        screens = token_resp.json().get("screens", [])
+        if not screens:
+            raise RuntimeError("Lounge token response contained no screens")
+        lounge_token = screens[0].get("loungeToken")
+        if not lounge_token:
+            raise RuntimeError("Lounge token missing from response")
+        logger.debug("Lounge: obtained lounge_token (length=%s)", len(lounge_token))
+
+        # Step 2 – bind to get SID and gsessionid
+        logger.debug("Lounge: binding session")
+        bind_headers = {
+            **self._LOUNGE_HEADERS,
+            self._LOUNGE_ID_HEADER: lounge_token,
+        }
+        bind_resp = http_requests.post(
+            self._LOUNGE_BIND_URL,
+            data=self._LOUNGE_BIND_DATA,
+            headers=bind_headers,
+            params={"RID": 0, "VER": 8, "CVER": 1},
+            timeout=10,
+        )
+        logger.debug(
+            "Lounge: bind response status=%s body=%s",
+            bind_resp.status_code, bind_resp.text[:500],
+        )
+        bind_resp.raise_for_status()
+        bind_content = bind_resp.text
+
+        sid_match = re.search(r'"c","(.*?)",\"', bind_content)
+        gsession_match = re.search(r'"S","(.*?)"]', bind_content)
+        if not sid_match or not gsession_match:
+            raise RuntimeError(
+                f"Failed to parse lounge bind response (length={len(bind_content)}): "
+                + bind_content[:300]
+            )
+        sid = sid_match.group(1)
+        gsession_id = gsession_match.group(1)
+        logger.debug("Lounge: bound SID=%s gsessionid=%s", sid, gsession_id)
+
+        # Step 3 – send setPlaylist command (RID=1)
+        all_ids = video_ids or [video_id]
+        playlist_data = {
+            "count": 1,
+            "req0__sc": "setPlaylist",
+            "req0_videoId": video_id,
+            "req0_videoIds": ",".join(all_ids),
+            "req0_currentTime": "0",
+            "req0_currentIndex": -1,
+            "req0_audioOnly": "false",
+        }
+        if playlist_id:
+            playlist_data["req0_listId"] = playlist_id
+        logger.debug("Lounge: sending setPlaylist data=%s", playlist_data)
+        play_resp = http_requests.post(
+            self._LOUNGE_BIND_URL,
+            data=playlist_data,
+            headers=bind_headers,
+            params={
+                "SID": sid,
+                "gsessionid": gsession_id,
+                "RID": 1,
+                "VER": 8,
+                "CVER": 1,
+            },
+            timeout=10,
+        )
+        logger.debug(
+            "Lounge: setPlaylist response status=%s body=%s",
+            play_resp.status_code, play_resp.text[:500],
+        )
+        play_resp.raise_for_status()
+
+        logger.info(
+            "Lounge: playback started video_id=%s playlist_id=%s screen_id=%s SID=%s",
+            video_id, playlist_id, screen_id, sid,
+        )
+        return {
+            "success": True,
+            "video_id": video_id,
+            "playlist_id": playlist_id,
+            "screen_id": screen_id,
+            "lounge_token": lounge_token,
+            "SID": sid,
+            "gsessionid": gsession_id,
+        }
+
+    def get_now_playing(
+        self,
+        lounge_token: str,
+        sid: str,
+        gsessionid: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Query the Lounge session for the currently playing video.
+
+        Returns a dict with 'videoId' and 'currentIndex' or None on failure.
+        """
+        logger.debug("Lounge: querying nowPlaying SID=%s", sid)
+        bind_headers = {
+            **self._LOUNGE_HEADERS,
+            self._LOUNGE_ID_HEADER: lounge_token,
+        }
+        try:
+            nonce = 42  # arbitrary offset ID for long-polling request
+            resp = http_requests.get(
+                self._LOUNGE_BIND_URL,
+                headers=bind_headers,
+                params={
+                    "SID": sid,
+                    "gsessionid": gsessionid,
+                    "RID": "rpc",
+                    "CI": 0,
+                    "TYPE": "xmlhttp",
+                    "AID": nonce,
+                    "VER": 8,
+                    "CVER": 1,
+                },
+                timeout=(5, 3),
+                stream=True,
+            )
+            resp.raise_for_status()
+            # Read only the first chunk — the Lounge endpoint is a long-poll
+            # that streams data and holds the connection open indefinitely.
+            body = ""
+            for chunk in resp.iter_content(chunk_size=4096, decode_unicode=True):
+                if chunk:
+                    body += chunk
+                # The initial batch always contains nowPlaying; stop after first chunk
+                if body:
+                    break
+            resp.close()
+            logger.debug("Lounge: nowPlaying response length=%s body=%s", len(body), body[:1000])
+
+            # Parse the long-poll response for nowPlaying data.
+            # The response is a series of numbered arrays.  We look for
+            # an entry containing "nowPlaying" followed by a dict.
+            now_playing_match = re.search(
+                r'"nowPlaying"\s*,\s*\{([^}]+)\}', body
+            )
+            if not now_playing_match:
+                logger.debug("Lounge: no nowPlaying entry in response")
+                return None
+
+            raw = "{" + now_playing_match.group(1) + "}"
+            # Parse key-value pairs from the Lounge format: "key":"value"
+            pairs: Dict[str, str] = {}
+            for kv_match in re.finditer(r'"(\w+)"\s*:\s*"([^"]*)"', raw):
+                pairs[kv_match.group(1)] = kv_match.group(2)
+
+            logger.debug("Lounge: nowPlaying parsed=%s", pairs)
+            return pairs
+        except Exception:
+            logger.exception("Lounge: failed to query nowPlaying")
+            return None
+
+    # endregion

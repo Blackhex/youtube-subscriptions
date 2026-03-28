@@ -131,6 +131,29 @@ class Video(db.Model):
         }
 
 
+class QueueItem(db.Model):
+    """A queued video waiting to be played."""
+
+    __tablename__ = "queue_items"
+
+    id = db.Column(db.Integer, primary_key=True)
+    video_id = db.Column(db.String(32), db.ForeignKey("videos.video_id"), nullable=False, unique=True)
+    sort_order = db.Column(db.Integer, nullable=False)
+    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    video = db.relationship("Video", foreign_keys=[video_id])
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "video_id": self.video_id,
+            "sort_order": self.sort_order,
+            "added_at": self.added_at.isoformat() if self.added_at else None,
+            "video": self.video.to_dict() if self.video else None,
+        }
+
+
 class Feed(db.Model):
     """A named feed column with filter criteria."""
 
@@ -148,6 +171,7 @@ class Feed(db.Model):
     filter_min_duration = db.Column(db.Integer, nullable=True)  # seconds
     filter_max_duration = db.Column(db.Integer, nullable=True)  # seconds
     filter_max_age_days = db.Column(db.Integer, nullable=True)  # only show videos from last N days
+    filter_play_state = db.Column(db.String(16), nullable=True)  # played, unplayed, both
 
     def _parse_category_groups(self) -> list:
         """Parse filter_category_ids into normalized OR-of-AND groups.
@@ -176,5 +200,6 @@ class Feed(db.Model):
             "filter_min_duration": self.filter_min_duration,
             "filter_max_duration": self.filter_max_duration,
             "filter_max_age_days": self.filter_max_age_days,
+            "filter_play_state": self.filter_play_state or "both",
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

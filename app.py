@@ -4,15 +4,15 @@ import os
 from pathlib import Path
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, cast
 
 from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func, or_, text
 from flask_cors import CORS
 import requests
 
-from models import Category, Feed, Subscription, Video, db, subscription_category
+from models import Category, Feed, QueueItem, Subscription, Video, db, subscription_category
 from youtube_service import YouTubeService
 
 logging.basicConfig(
@@ -30,6 +30,32 @@ CORS(app)
 
 youtube_service = None
 THUMBNAIL_CACHE_DIR = Path(app.instance_path) / "thumbnails"
+
+# Lounge session state for Cast playback tracking
+_lounge_session: Optional[Dict[str, str]] = None
+_LOUNGE_SESSION_FILE = Path(app.instance_path) / "lounge_session.json"
+
+
+def _save_lounge_session() -> None:
+    """Persist lounge session to disk so it survives server restarts."""
+    if _lounge_session:
+        _LOUNGE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LOUNGE_SESSION_FILE.write_text(json.dumps(_lounge_session))
+    elif _LOUNGE_SESSION_FILE.exists():
+        _LOUNGE_SESSION_FILE.unlink()
+
+
+def _load_lounge_session() -> Optional[Dict[str, str]]:
+    """Load persisted lounge session from disk."""
+    global _lounge_session
+    if _lounge_session is None and _LOUNGE_SESSION_FILE.exists():
+        try:
+            _lounge_session = json.loads(_LOUNGE_SESSION_FILE.read_text())
+            logger.debug("Restored lounge session from disk")
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Failed to read lounge session file, ignoring")
+            _lounge_session = None
+    return _lounge_session
 
 
 def get_youtube_service() -> YouTubeService:
@@ -72,6 +98,240 @@ def _cache_thumbnail(thumbnail_url: Optional[str], video_id: str) -> Optional[st
     return str(cached_path)
 
 
+def _serialize_queue_items() -> List[Dict[str, Any]]:
+    """Return queued videos ordered by sort order."""
+    queue_items = cast(List[QueueItem], QueueItem.query.order_by(QueueItem.sort_order.asc(), QueueItem.added_at.asc()).all())
+    return [item.to_dict() for item in queue_items]
+
+
+def _next_queue_sort_order() -> int:
+    """Return the next queue sort order value."""
+    max_sort = db.session.query(func.max(QueueItem.sort_order)).scalar()
+    return (max_sort or 0) + 1
+
+
+def _clear_queue_items() -> None:
+    """Remove all queue items."""
+    QueueItem.query.delete()
+    db.session.commit()
+
+
+def _playlist_title_for_queue(prefix: str) -> str:
+    """Build a short playlist title for the current queue."""
+    return f"{prefix} {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+
+
+def _mark_video_played(video_id: str) -> None:
+    """Set a video's playback_progress to 100 (fully watched)."""
+    video = Video.query.filter_by(video_id=video_id).first()
+    if video:
+        video.playback_progress = 100
+
+
+def _remove_queue_item_as_played(item: QueueItem) -> None:
+    """Delete a queue item and mark its video as played."""
+    _mark_video_played(item.video_id)
+    db.session.delete(item)
+
+
+def _refresh_queue_playback_progress() -> Dict[str, Any]:
+    """Refresh playback progress for queued videos and prune watched items."""
+    global _lounge_session
+    _load_lounge_session()
+    queue_items = cast(List[QueueItem], QueueItem.query.order_by(QueueItem.sort_order.asc(), QueueItem.added_at.asc()).all())
+    if not queue_items:
+        _lounge_session = None
+        _save_lounge_session()
+        return {"items": [], "removed_count": 0, "updated_count": 0}
+
+    removed_count = 0
+
+    # If we have an active Lounge session, ask the receiver what's playing now
+    if _lounge_session:
+        try:
+            service = get_youtube_service()
+            now_playing = service.get_now_playing(
+                lounge_token=_lounge_session["lounge_token"],
+                sid=_lounge_session["SID"],
+                gsessionid=_lounge_session["gsessionid"],
+            )
+            has_played = _lounge_session.get("has_played", False)
+            stale_count = _lounge_session.get("stale_count", 0)
+
+            if now_playing:
+                current_video_id = now_playing.get("videoId", "")
+                state = now_playing.get("state", "")
+                duration = now_playing.get("duration", "0")
+                current_time = now_playing.get("currentTime", "0")
+                logger.debug(
+                    "Lounge nowPlaying videoId=%s state=%s duration=%s currentTime=%s has_played=%s stale_count=%s",
+                    current_video_id, state, duration, current_time, has_played, stale_count,
+                )
+
+                queue_video_ids = [item.video_id for item in queue_items]
+
+                # Mark session as having active playback once we see a queue
+                # video actually playing (state 1 = playing, 2 = paused,
+                # or any state with a real duration).
+                if current_video_id in queue_video_ids and not has_played:
+                    if state in ("1", "2") or duration not in ("0", ""):
+                        _lounge_session["has_played"] = True
+                        has_played = True
+                        _lounge_session["stale_count"] = 0
+                        _save_lounge_session()
+                        logger.debug("Marked lounge session as has_played=True")
+
+                if current_video_id in queue_video_ids:
+                    # Reset stale counter when video is actively playing (has real duration)
+                    if stale_count > 0 and duration not in ("0", ""):
+                        _lounge_session["stale_count"] = 0
+                        stale_count = 0
+                        _save_lounge_session()
+
+                    # Remove all queue items that come before the currently playing video
+                    for item in queue_items:
+                        if item.video_id == current_video_id:
+                            # If playback is stopped/ended (state 0 or -1), also remove the current video
+                            if state in ("0", "-1"):
+                                _remove_queue_item_as_played(item)
+                                removed_count += 1
+                            break
+                        _remove_queue_item_as_played(item)
+                        removed_count += 1
+
+                    # After a playlist finishes, the Lounge keeps reporting the
+                    # last video with state=3, duration=0, currentTime=0.  When
+                    # the current video is the last item AND we have previously
+                    # seen active playback, treat the playlist as finished —
+                    # but only after seeing this pattern multiple times.
+                    is_last_item = (queue_video_ids[-1] == current_video_id)
+                    if is_last_item and has_played and duration == "0" and current_time == "0" and state != "1":
+                        stale_count += 1
+                        _lounge_session["stale_count"] = stale_count
+                        _save_lounge_session()
+                        if stale_count >= 3:
+                            logger.debug("Last queue video stale for %s polls, removing it", stale_count)
+                            remaining_items = cast(List[QueueItem], QueueItem.query.all())
+                            for ri in remaining_items:
+                                if ri.video_id == current_video_id:
+                                    _remove_queue_item_as_played(ri)
+                                    removed_count += 1
+                        else:
+                            logger.debug("Last queue video duration=0 stale_count=%s, waiting", stale_count)
+                elif current_video_id and current_video_id not in queue_video_ids and has_played:
+                    # Receiver moved to a video not in our queue (autoplay) — playlist ended
+                    logger.debug(
+                        "Lounge nowPlaying videoId=%s not in queue (has_played=True), clearing queue",
+                        current_video_id,
+                    )
+                    for item in queue_items:
+                        _remove_queue_item_as_played(item)
+                        removed_count += 1
+                else:
+                    # Empty videoId or videoId not in queue before playback started — skip
+                    logger.debug(
+                        "Lounge nowPlaying videoId=%r not actionable (has_played=%s), keeping queue",
+                        current_video_id, has_played,
+                    )
+            else:
+                # No nowPlaying data in this long-poll chunk — this does NOT
+                # reliably indicate playback has ended.  Skip and retry next poll.
+                logger.debug("Lounge returned no nowPlaying, skipping (not a reliable end signal)")
+
+            if removed_count > 0:
+                db.session.commit()
+                logger.debug("Removed %s queue items", removed_count)
+
+            remaining = QueueItem.query.count()
+            if remaining == 0:
+                _lounge_session = None
+                _save_lounge_session()
+
+            logger.debug(
+                "Queue playback progress refreshed removed_count=%s remaining=%s",
+                removed_count, remaining,
+            )
+            return {
+                "items": _serialize_queue_items(),
+                "removed_count": removed_count,
+                "updated_count": 0,
+            }
+        except Exception:
+            logger.exception("Failed to query Lounge nowPlaying, clearing session and falling back to history")
+            _lounge_session = None
+            _save_lounge_session()
+
+    # Fallback: check YouTube watch history for progress
+    video_ids = [item.video_id for item in queue_items]
+    videos_by_id = {
+        video.video_id: video
+        for video in cast(List[Video], Video.query.filter(Video.video_id.in_(video_ids)).all())
+    }
+    service = YouTubeService.from_credentials(get_youtube_service().credentials)
+
+    try:
+        progress_map = service.fetch_watch_progress(video_ids)
+    except Exception:
+        logger.exception("Failed to refresh queue playback progress")
+        progress_map = {}
+
+    updated_count = 0
+    removed_items: List[QueueItem] = []
+
+    for item in queue_items:
+        video = videos_by_id.get(item.video_id)
+        if video is None:
+            removed_items.append(item)
+            removed_count += 1
+            continue
+
+        progress = progress_map.get(item.video_id)
+        if progress is not None:
+            video.playback_progress = progress
+            updated_count += 1
+
+        if (video.playback_progress or 0) >= 95:
+            removed_items.append(item)
+            removed_count += 1
+
+    for item in removed_items:
+        db.session.delete(item)
+
+    db.session.commit()
+    logger.debug(
+        "Queue playback progress refreshed updated_count=%s removed_count=%s remaining=%s",
+        updated_count,
+        removed_count,
+        QueueItem.query.count(),
+    )
+    return {"items": _serialize_queue_items(), "removed_count": removed_count, "updated_count": updated_count}
+
+
+def _create_queue_playlist(clear_queue_items: bool) -> Dict[str, Any]:
+    """Create a YouTube playlist from the current queue."""
+    queue_items = cast(List[QueueItem], QueueItem.query.order_by(QueueItem.sort_order.asc(), QueueItem.added_at.asc()).all())
+    if not queue_items:
+        raise ValueError("Queue is empty")
+
+    service = get_youtube_service()
+    playlist_title = _playlist_title_for_queue("Queue")
+    playlist_description = "Created from YouTube Subscriptions Organizer queue."
+    playlist_id = service.create_playlist(playlist_title, playlist_description)
+    added_count = service.add_videos_to_playlist(playlist_id, [item.video_id for item in queue_items])
+
+    if clear_queue_items:
+        QueueItem.query.delete()
+        db.session.commit()
+
+    return {
+        "playlist_id": playlist_id,
+        "playlist_url": f"https://www.youtube.com/playlist?list={playlist_id}",
+        "playlist_title": playlist_title,
+        "added_count": added_count,
+        "cleared": clear_queue_items,
+    }
+
+
 # ============================================================================
 # Background Sync State
 # ============================================================================
@@ -108,6 +368,7 @@ def init_db():
         _ensure_category_sort_order_column()
         _initialize_category_sort_order()
         _ensure_subscription_videos_synced_at_column()
+        _ensure_feed_play_state_column()
 
 
 def _ensure_category_sort_order_column() -> None:
@@ -173,6 +434,31 @@ def _ensure_subscription_videos_synced_at_column() -> None:
         db.session.commit()
     else:
         logger.debug("videos_synced_at column already present")
+
+
+def _ensure_feed_play_state_column() -> None:
+    """Add filter_play_state column to feeds table if missing (schema migration)."""
+    result = db.session.execute(text("PRAGMA table_info(feeds)"))
+    columns = [row[1] for row in result.fetchall()]
+    if "filter_play_state" in columns:
+        logger.debug("filter_play_state column already present")
+        return
+
+    logger.debug("Adding missing filter_play_state column to feeds table")
+    db.session.execute(text("ALTER TABLE feeds ADD COLUMN filter_play_state VARCHAR(16)"))
+    db.session.commit()
+
+    if "filter_played_only" in columns:
+        logger.debug("Backfilling filter_play_state from legacy filter_played_only values")
+        db.session.execute(
+            text(
+                "UPDATE feeds SET filter_play_state = CASE "
+                "WHEN filter_played_only = 1 THEN 'played' "
+                "WHEN filter_played_only = 0 THEN 'both' "
+                "ELSE 'both' END"
+            )
+        )
+        db.session.commit()
 
 
 # ============================================================================
@@ -1063,6 +1349,9 @@ def create_feed():
         filter_min_duration=data.get("filter_min_duration"),
         filter_max_duration=data.get("filter_max_duration"),
         filter_max_age_days=data.get("filter_max_age_days"),
+        filter_play_state=data.get("filter_play_state") or (
+            "played" if data.get("filter_played_only") else "both"
+        ),
     )
     db.session.add(feed)
     db.session.commit()
@@ -1090,6 +1379,10 @@ def update_feed(feed_id: int):
         feed.filter_max_duration = data["filter_max_duration"]
     if "filter_max_age_days" in data:
         feed.filter_max_age_days = data["filter_max_age_days"]
+    if "filter_play_state" in data:
+        feed.filter_play_state = data["filter_play_state"] or "both"
+    elif "filter_played_only" in data:
+        feed.filter_play_state = "played" if data["filter_played_only"] else "both"
 
     db.session.commit()
     logger.debug("Updated feed id=%s name=%s", feed.id, feed.name)
@@ -1148,6 +1441,13 @@ def get_feed_videos(feed_id: int):
         cutoff = datetime.utcnow() - timedelta(days=feed.filter_max_age_days)
         query = query.filter(Video.published_at >= cutoff)
 
+    if feed.filter_play_state == "played":
+        logger.debug("Applying played-only filter for feed_id=%s", feed_id)
+        query = query.filter(Video.playback_progress >= 95)
+    elif feed.filter_play_state == "unplayed":
+        logger.debug("Applying unplayed-only filter for feed_id=%s", feed_id)
+        query = query.filter(or_(Video.playback_progress.is_(None), Video.playback_progress < 95))
+
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
     per_page = min(per_page, 100)
@@ -1162,6 +1462,166 @@ def get_feed_videos(feed_id: int):
         "per_page": per_page,
         "has_more": page * per_page < total,
     })
+
+
+# ============================================================================
+# Queue Endpoints
+# ============================================================================
+
+
+@app.get("/api/queue")
+def get_queue() -> Dict[str, Any]:
+    """Get the current play queue."""
+    logger.debug("Handling get_queue request")
+    return jsonify({"items": _serialize_queue_items()})
+
+
+@app.post("/api/queue")
+def add_to_queue() -> Dict[str, Any]:
+    """Add one or more videos to the queue."""
+    data = request.get_json() or {}
+    video_ids = data.get("video_ids")
+    if isinstance(video_ids, str):
+        video_ids = [video_ids]
+    elif data.get("video_id"):
+        video_ids = [data.get("video_id")]
+
+    logger.debug("Handling add_to_queue request video_count=%s", len(video_ids) if isinstance(video_ids, list) else 0)
+    if not isinstance(video_ids, list) or not video_ids:
+        return jsonify({"error": "video_ids must be a non-empty list"}), 400
+
+    existing_ids = {
+        row[0]
+        for row in db.session.query(QueueItem.video_id).filter(QueueItem.video_id.in_(video_ids)).all()
+    }
+
+    next_sort = _next_queue_sort_order()
+    added_count = 0
+    missing_ids: List[str] = []
+    seen_ids: set = set()
+
+    for video_id in video_ids:
+        if video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
+
+        if video_id in existing_ids:
+            continue
+
+        video = Video.query.filter_by(video_id=video_id).first()
+        if not video:
+            missing_ids.append(video_id)
+            continue
+
+        queue_item = QueueItem(video_id=video_id, sort_order=next_sort)
+        db.session.add(queue_item)
+        next_sort += 1
+        added_count += 1
+
+    if added_count > 0:
+        db.session.commit()
+
+    logger.debug("Queue add complete added_count=%s skipped_existing=%s missing_count=%s", added_count, len(existing_ids), len(missing_ids))
+    return jsonify({"message": "Videos added to queue", "added_count": added_count, "missing_ids": missing_ids, "items": _serialize_queue_items()}), 201
+
+
+@app.delete("/api/queue/<int:queue_item_id>")
+def remove_queue_item(queue_item_id: int) -> Dict[str, Any]:
+    """Remove a queued video."""
+    logger.debug("Handling remove_queue_item request queue_item_id=%s", queue_item_id)
+    queue_item = QueueItem.query.get_or_404(queue_item_id)
+    db.session.delete(queue_item)
+    db.session.commit()
+    return jsonify({"message": "Queue item removed", "items": _serialize_queue_items()})
+
+
+@app.post("/api/queue/clear")
+def clear_queue() -> Dict[str, Any]:
+    """Clear the entire queue."""
+    logger.debug("Handling clear_queue request")
+    _clear_queue_items()
+    return jsonify({"message": "Queue cleared", "items": []})
+
+
+@app.post("/api/queue/create-playlist")
+def create_queue_playlist() -> Dict[str, Any]:
+    """Create a YouTube playlist from the queue and clear it afterward."""
+    logger.debug("Handling create_queue_playlist request")
+    try:
+        result = _create_queue_playlist(clear_queue_items=True)
+        result["items"] = _serialize_queue_items()
+        return jsonify(result), 201
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logger.exception("Failed to create queue playlist")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.post("/api/queue/cast")
+def cast_queue() -> Dict[str, Any]:
+    """Start playback on a YouTube Cast receiver via the Lounge API.
+
+    Expects JSON body with ``screen_id`` (obtained from the MDX session status
+    on the Cast channel).  Sends the queue video IDs to the YouTube receiver
+    via the Lounge API to initiate playback.
+    """
+    logger.debug("Handling cast_queue request")
+    try:
+        data = request.get_json(silent=True) or {}
+        screen_id = data.get("screen_id")
+        logger.debug("cast_queue screen_id=%s", screen_id)
+
+        if not screen_id:
+            return jsonify({"error": "screen_id is required – ensure Cast session is connected"}), 400
+
+        # Determine the videos to play
+        queue_items_db = cast(
+            List[QueueItem],
+            QueueItem.query.order_by(QueueItem.sort_order.asc(), QueueItem.added_at.asc()).all(),
+        )
+        if not queue_items_db:
+            return jsonify({"error": "No videos in queue"}), 400
+        all_video_ids = [item.video_id for item in queue_items_db]
+
+        # Start playback via YouTube Lounge API
+        service = get_youtube_service()
+        lounge_result = service.cast_to_receiver(
+            screen_id=screen_id,
+            video_id=all_video_ids[0],
+            video_ids=all_video_ids,
+        )
+        logger.debug("cast_queue lounge_result=%s", lounge_result)
+
+        # Store Lounge session for nowPlaying polling
+        global _lounge_session
+        _lounge_session = {
+            "lounge_token": lounge_result.get("lounge_token", ""),
+            "SID": lounge_result.get("SID", ""),
+            "gsessionid": lounge_result.get("gsessionid", ""),
+            "has_played": False,
+        }
+        _save_lounge_session()
+        logger.debug("Stored lounge session for polling")
+
+        result: Dict[str, Any] = {
+            "items": _serialize_queue_items(),
+            "lounge": lounge_result,
+        }
+        return jsonify(result), 201
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logger.exception("Failed to cast queue")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.post("/api/queue/refresh-progress")
+def refresh_queue_progress() -> Dict[str, Any]:
+    """Refresh queued videos' watch progress and remove watched items."""
+    logger.debug("Handling refresh_queue_progress request")
+    result = _refresh_queue_playback_progress()
+    return jsonify(result)
 
 
 @app.get("/api/videos/<string:video_id>/thumbnail")

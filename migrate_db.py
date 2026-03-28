@@ -75,6 +75,30 @@ def _migrate_file(db_path):
             logger.info("thumbnail_path column added successfully")
         else:
             logger.info("thumbnail_path column already exists")
+
+        # Migrate feeds table
+        cursor.execute("PRAGMA table_info(feeds)")
+        feed_columns = [col[1] for col in cursor.fetchall()]
+        logger.debug("Fetched %s feed columns", len(feed_columns))
+
+        if 'filter_play_state' not in feed_columns:
+            logger.info("Adding filter_play_state column to feeds table")
+            cursor.execute("ALTER TABLE feeds ADD COLUMN filter_play_state VARCHAR(16)")
+            conn.commit()
+            logger.info("filter_play_state column added successfully")
+
+            if 'filter_played_only' in feed_columns:
+                logger.info("Backfilling filter_play_state from legacy filter_played_only values")
+                cursor.execute(
+                    "UPDATE feeds SET filter_play_state = CASE "
+                    "WHEN filter_played_only = 1 THEN 'played' "
+                    "WHEN filter_played_only = 0 THEN 'both' "
+                    "ELSE 'both' END"
+                )
+                conn.commit()
+                logger.info("filter_play_state backfill complete")
+        else:
+            logger.info("filter_play_state column already exists")
         
         conn.close()
         logger.debug("Closed database connection for db_path=%s", db_path)

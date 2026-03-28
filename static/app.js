@@ -10,6 +10,40 @@ let currentSearchQuery = "";
 let suggestedCategoryIds = [];
 let subscriptionsLoadingMore = false;
 const feedVideoPagination = {};
+let allQueueItems = [];
+let queuePlaybackActive = false;
+let queueSyncInterval = null;
+const CAST_APPLICATION_ID = window.CAST_APPLICATION_ID || "233637DE";
+const YOUTUBE_MDX_NAMESPACE = "urn:x-cast:com.google.youtube.mdx";
+let castContext = null;
+let castSession = null;
+let castFrameworkReady = false;
+let youtubeMdxListenerAttached = false;
+let _receiverScreenId = null;
+let _screenIdResolve = null;
+let _castSessionId = null;
+const CAST_SESSION_KEY = "cast_session_id";
+const CAST_SCREEN_ID_KEY = "cast_screen_id";
+const CAST_DEBUG_ENABLED = window.CAST_DEBUG !== false;
+
+function logCastDebug(message, details = null) {
+  if (!CAST_DEBUG_ENABLED) {
+    return;
+  }
+
+  if (details !== null && details !== undefined) {
+    console.log(`[Cast] ${message}`, details);
+    return;
+  }
+
+  console.log(`[Cast] ${message}`);
+}
+
+window.__onGCastApiAvailable = function(isAvailable) {
+  if (isAvailable) {
+    initializeCastFramework();
+  }
+};
 
 // API base URL
 const API_BASE = "/api";
@@ -118,6 +152,395 @@ function resetScrollSentinel(container) {
   if (sentinel) {
     sentinel.remove();
   }
+}
+
+function initializeCastFramework() {
+  if (castFrameworkReady) {
+    return;
+  }
+
+  if (!window.cast || !window.cast.framework || !window.chrome || !window.chrome.cast) {
+    return;
+  }
+
+  try {
+    logCastDebug("Initializing Cast framework", { receiverApplicationId: CAST_APPLICATION_ID });
+    castContext = cast.framework.CastContext.getInstance();
+    castContext.setOptions({
+      receiverApplicationId: CAST_APPLICATION_ID,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+    });
+    castContext.addEventListener(
+      cast.framework.CastContextEventType.CAST_STATE_CHANGED,
+      updateCastReceiverStatus
+    );
+    castContext.addEventListener(
+      cast.framework.CastContextEventType.SESSION_STATE_CHANGED,
+      onCastSessionStateChanged
+    );
+    castFrameworkReady = true;
+    logCastDebug("Cast framework ready", {
+      castState: castContext.getCastState ? castContext.getCastState() : null,
+    });
+    updateCastReceiverStatus();
+    tryResumeCastSession();
+  } catch (error) {
+    console.error("[Cast] Cast initialization failed", error);
+    showToast(`Cast initialization failed: ${error.message}`, "error");
+  }
+}
+
+function updateCastReceiverStatus() {
+  const statusEl = document.getElementById("castReceiverStatus");
+  if (!statusEl) {
+    return;
+  }
+
+  if (!castContext) {
+    statusEl.classList.add("d-none");
+    statusEl.textContent = "";
+    return;
+  }
+
+  const session = castContext.getCurrentSession ? castContext.getCurrentSession() : null;
+  const deviceName = session && session.getCastDevice ? session.getCastDevice()?.friendlyName : null;
+
+  if (deviceName) {
+    statusEl.textContent = `Receiver: ${deviceName}`;
+    statusEl.classList.remove("d-none");
+    return;
+  }
+
+  const castState = castContext.getCastState ? castContext.getCastState() : null;
+  if (castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
+    statusEl.textContent = "No Cast devices found";
+  } else if (castState === cast.framework.CastState.NOT_CONNECTED) {
+    statusEl.textContent = "Select a Cast receiver";
+  } else {
+    statusEl.textContent = "Cast ready";
+  }
+  statusEl.classList.remove("d-none");
+}
+
+function onCastSessionStateChanged(event) {
+  if (!event) {
+    return;
+  }
+
+  logCastDebug("Session state changed", {
+    sessionState: event.sessionState,
+    castState: castContext && castContext.getCastState ? castContext.getCastState() : null,
+  });
+
+  if (event.sessionState === cast.framework.SessionState.SESSION_STARTED ||
+      event.sessionState === cast.framework.SessionState.SESSION_RESUMED) {
+    castSession = castContext ? castContext.getCurrentSession() : null;
+    const sessionObj = castSession && castSession.getSessionObj ? castSession.getSessionObj() : null;
+    _castSessionId = sessionObj ? sessionObj.sessionId : null;
+    logCastDebug("Cast session attached", {
+      hasSession: Boolean(castSession),
+      sessionId: _castSessionId,
+      resumed: event.sessionState === cast.framework.SessionState.SESSION_RESUMED,
+    });
+    saveCastSession();
+    attachYouTubeMdxListener(castSession);
+    updateCastReceiverStatus();
+    return;
+  }
+
+  if (event.sessionState === cast.framework.SessionState.SESSION_ENDED) {
+    logCastDebug("Cast session ended");
+    castSession = null;
+    _castSessionId = null;
+    _receiverScreenId = null;
+    youtubeMdxListenerAttached = false;
+    clearCastSession();
+    stopQueueSyncPolling();
+    updateCastReceiverStatus();
+  }
+}
+
+function saveCastSession() {
+  try {
+    if (_castSessionId) {
+      sessionStorage.setItem(CAST_SESSION_KEY, _castSessionId);
+    }
+    if (_receiverScreenId) {
+      sessionStorage.setItem(CAST_SCREEN_ID_KEY, _receiverScreenId);
+    }
+    logCastDebug("Saved Cast session to sessionStorage", {
+      sessionId: _castSessionId,
+      screenId: _receiverScreenId,
+    });
+  } catch (e) {
+    logCastDebug("Failed to save Cast session", { error: e.message });
+  }
+}
+
+function clearCastSession() {
+  try {
+    sessionStorage.removeItem(CAST_SESSION_KEY);
+    sessionStorage.removeItem(CAST_SCREEN_ID_KEY);
+    logCastDebug("Cleared Cast session from sessionStorage");
+  } catch (e) {
+    logCastDebug("Failed to clear Cast session", { error: e.message });
+  }
+}
+
+function tryResumeCastSession() {
+  try {
+    const savedSessionId = sessionStorage.getItem(CAST_SESSION_KEY);
+    const savedScreenId = sessionStorage.getItem(CAST_SCREEN_ID_KEY);
+    if (!savedSessionId) {
+      return;
+    }
+
+    logCastDebug("Attempting to resume Cast session", {
+      sessionId: savedSessionId,
+      screenId: savedScreenId,
+    });
+
+    if (savedScreenId) {
+      _receiverScreenId = savedScreenId;
+    }
+
+    chrome.cast.requestSessionById(savedSessionId);
+  } catch (e) {
+    logCastDebug("Failed to resume Cast session", { error: e.message });
+    clearCastSession();
+  }
+}
+
+async function requestCastSession() {
+  if (!castContext) {
+    throw new Error("Google Cast is not available in this browser");
+  }
+
+  // If there is already an active session, reuse it
+  castSession = castContext.getCurrentSession ? castContext.getCurrentSession() : null;
+  if (castSession) {
+    logCastDebug("Reusing existing Cast session", {
+      sessionId: castSession.getSessionObj ? castSession.getSessionObj()?.sessionId : null,
+    });
+    return castSession;
+  }
+
+  logCastDebug("Requesting Cast session");
+  const maybePromise = castContext.requestSession();
+  if (maybePromise && typeof maybePromise.then === "function") {
+    await maybePromise;
+  }
+
+  castSession = castContext.getCurrentSession ? castContext.getCurrentSession() : null;
+  if (!castSession) {
+    throw new Error("Cast session was not created");
+  }
+
+  logCastDebug("Cast session available", {
+    sessionId: castSession.getSessionObj ? castSession.getSessionObj()?.sessionId : null,
+    deviceName: castSession.getCastDevice ? castSession.getCastDevice()?.friendlyName : null,
+    namespaces: castSession.getSessionObj ? castSession.getSessionObj()?.namespaces : null,
+    appId: castSession.getSessionObj ? castSession.getSessionObj()?.appId : null,
+    displayName: castSession.getSessionObj ? castSession.getSessionObj()?.displayName : null,
+    applicationMetadata: castSession.getApplicationMetadata ? castSession.getApplicationMetadata() : null,
+  });
+
+  return castSession;
+}
+
+function buildCastQueueItems() {
+  const queueVideos = allQueueItems
+    .map((item) => item.video)
+    .filter((video) => video && video.video_id);
+
+  logCastDebug("Building Cast queue items", {
+    queueItemCount: allQueueItems.length,
+    playableVideoCount: queueVideos.length,
+  });
+
+  return queueVideos.map((video) => {
+    const youtubeUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(video.video_id)}`;
+    const mediaInfo = new chrome.cast.media.MediaInfo(youtubeUrl, "video/mp4");
+    mediaInfo.contentUrl = youtubeUrl;
+    mediaInfo.entity = youtubeUrl;
+
+    const metadata = new chrome.cast.media.GenericMediaMetadata();
+    metadata.title = video.title || "Untitled video";
+    metadata.subtitle = video.channel_title || "";
+    if (video.thumbnail_url) {
+      metadata.images = [new chrome.cast.Image(video.thumbnail_url)];
+    }
+    mediaInfo.metadata = metadata;
+
+    const queueItem = new chrome.cast.media.QueueItem(mediaInfo);
+    queueItem.autoplay = true;
+
+    logCastDebug("Prepared Cast queue item", {
+      videoId: video.video_id,
+      title: video.title || "Untitled video",
+      channelTitle: video.channel_title || "",
+      contentId: mediaInfo.contentId,
+      contentType: mediaInfo.contentType,
+      hasMetadata: Boolean(mediaInfo.metadata),
+    });
+
+    return queueItem;
+  });
+}
+
+function buildCastLoadRequest() {
+  const queueItems = buildCastQueueItems();
+  if (!queueItems.length) {
+    throw new Error("Queue is empty");
+  }
+
+  logCastDebug("Creating Cast playlist request", {
+    itemCount: queueItems.length,
+    requestItems: queueItems.map((item) => ({
+      itemId: item.itemId ?? null,
+      autoplay: item.autoplay,
+      contentId: item.media ? item.media.contentId : null,
+      contentType: item.media ? item.media.contentType : null,
+      entity: item.media ? item.media.entity : null,
+      title: item.media && item.media.metadata ? item.media.metadata.title : null,
+    })),
+  });
+
+  return {
+    items: queueItems,
+    firstMedia: queueItems[0].media,
+  };
+}
+
+function getCastNamespaceNames(session) {
+  const sessionObj = session && typeof session.getSessionObj === "function" ? session.getSessionObj() : session;
+  const namespaces = sessionObj && Array.isArray(sessionObj.namespaces) ? sessionObj.namespaces : [];
+
+  return namespaces
+    .map((namespace) => {
+      if (typeof namespace === "string") {
+        return namespace;
+      }
+
+      if (namespace && typeof namespace.name === "string") {
+        return namespace.name;
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function buildYouTubePlaylistMessage(queuePayload) {
+  const queueItems = Array.isArray(queuePayload.items) ? queuePayload.items : [];
+  const videoIds = queueItems
+    .map((item) => item && item.video ? item.video.video_id : null)
+    .filter(Boolean);
+  const firstVideoId = videoIds.length > 0 ? videoIds[0] : null;
+
+  return {
+    __sc: "setPlaylist",
+    count: 1,
+    videoId: firstVideoId,
+    listId: queuePayload.playlist_id || "",
+    currentTime: "0",
+    currentIndex: -1,
+    audioOnly: "false",
+    req0__sc: "setPlaylist",
+    req0_count: 1,
+    req0_videoId: firstVideoId,
+    req0_listId: queuePayload.playlist_id || "",
+    req0_currentTime: "0",
+    req0_currentIndex: -1,
+    req0_audioOnly: "false",
+    videoIds,
+    playlistId: queuePayload.playlist_id || "",
+    playlistTitle: queuePayload.playlist_title || "Queue playlist",
+    params: queuePayload.params || "",
+    ctt: queuePayload.ctt || "",
+  };
+}
+
+function attachYouTubeMdxListener(session) {
+  if (!session || youtubeMdxListenerAttached || typeof session.addMessageListener !== "function") {
+    return;
+  }
+
+  try {
+    session.addMessageListener(YOUTUBE_MDX_NAMESPACE, onYouTubeMdxMessage);
+    youtubeMdxListenerAttached = true;
+    logCastDebug("Attached YouTube MDX message listener", {
+      namespace: YOUTUBE_MDX_NAMESPACE,
+    });
+  } catch (error) {
+    console.error("[Cast] Failed to attach YouTube MDX listener", error);
+  }
+}
+
+function onYouTubeMdxMessage(namespace, message) {
+  logCastDebug("YouTube MDX message received", { namespace, message });
+
+  try {
+    const parsed = typeof message === "string" ? JSON.parse(message) : message;
+    logCastDebug("Parsed MDX message", {
+      type: parsed ? parsed.type : null,
+      hasData: Boolean(parsed && parsed.data),
+      screenId: parsed && parsed.data ? parsed.data.screenId : null,
+      deviceId: parsed && parsed.data ? parsed.data.deviceId : null,
+    });
+
+    if (parsed && parsed.type === "mdxSessionStatus" && parsed.data && parsed.data.screenId) {
+      _receiverScreenId = parsed.data.screenId;
+      logCastDebug("Extracted screenId from MDX status", { screenId: _receiverScreenId });
+      saveCastSession();
+      if (_screenIdResolve) {
+        _screenIdResolve(_receiverScreenId);
+        _screenIdResolve = null;
+      }
+    }
+  } catch (parseError) {
+    logCastDebug("Failed to parse MDX message", { error: parseError.message });
+  }
+}
+
+async function getYouTubeScreenId(session, timeoutMs = 10000) {
+  if (_receiverScreenId) {
+    logCastDebug("Using cached screenId", { screenId: _receiverScreenId });
+    return _receiverScreenId;
+  }
+
+  logCastDebug("Requesting getMdxSessionStatus for screenId");
+  const screenIdPromise = new Promise((resolve, reject) => {
+    _screenIdResolve = resolve;
+    setTimeout(() => {
+      if (_screenIdResolve === resolve) {
+        _screenIdResolve = null;
+        reject(new Error("Timed out waiting for YouTube screenId (" + timeoutMs + "ms)"));
+      }
+    }, timeoutMs);
+  });
+
+  try {
+    await sendCastMessage(session, YOUTUBE_MDX_NAMESPACE, { type: "getMdxSessionStatus" });
+    logCastDebug("getMdxSessionStatus sent, waiting for response");
+  } catch (sendError) {
+    logCastDebug("Failed to send getMdxSessionStatus", { error: sendError.message });
+  }
+
+  return screenIdPromise;
+}
+
+function sendCastMessage(session, namespace, message) {
+  return new Promise((resolve, reject) => {
+    try {
+      const maybeResult = session.sendMessage(namespace, message, resolve, reject);
+      if (maybeResult && typeof maybeResult.then === "function") {
+        maybeResult.then(resolve, reject);
+      }
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 // --- HTML-based alert/confirm/toast replacements ---
@@ -760,6 +1183,212 @@ function renderSubscriptions(subscriptions = allSubscriptions) {
   bindAutoLoadOnScroll(container, loadMoreSubscriptions, () => subscriptionsHasMore && !currentSearchQuery, () => subscriptionsLoadingMore);
 }
 
+// ============================================================================
+// Queue functions
+// ============================================================================
+
+async function loadQueue() {
+  try {
+    showSpinner();
+    const data = await fetchAPI("/queue");
+    allQueueItems = data.items || [];
+    renderQueue();
+  } catch (error) {
+    showToast(`Error loading queue: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+function renderQueue() {
+  const container = document.getElementById("queueList");
+  if (!container) {
+    return;
+  }
+
+  if (!allQueueItems.length) {
+    container.innerHTML = "";
+    return;
+  }
+
+  container.innerHTML = allQueueItems.map((item, index) => renderQueueItem(item, index)).join("");
+  applyWatchedState(container, allQueueItems.map((item) => item.video).filter(Boolean));
+}
+
+function renderQueueItem(item, index) {
+  const video = item.video || {};
+  if (!video.video_id) {
+    return `
+      <div class="list-item list-item-spacious video-item queue-item watched" data-queue-item-id="${item.id}">
+        <div class="list-item-info">
+          <div class="list-item-title">Unavailable video</div>
+          <div class="list-item-subtitle">This queue entry no longer has a matching video record.</div>
+        </div>
+        <div class="action-group">
+          <button class="btn-action btn-action-danger btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); removeQueueItem(${item.id})" title="Remove from queue">
+            <span class="material-icons">close</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  return renderVideoItem(video, {
+    showQueueAction: false,
+    showRemoveAction: true,
+    queueItemId: item.id,
+    extraClass: "queue-item",
+  });
+}
+
+async function addVideoToQueue(videoId) {
+  try {
+    const result = await fetchAPI("/queue", {
+      method: "POST",
+      body: JSON.stringify({ video_id: videoId }),
+    });
+    allQueueItems = result.items || allQueueItems;
+    renderQueue();
+    showToast("Video added to queue", "success");
+  } catch (error) {
+    showToast(`Error adding video to queue: ${error.message}`, "error");
+  }
+}
+
+async function removeQueueItem(queueItemId) {
+  try {
+    const result = await fetchAPI(`/queue/${queueItemId}`, { method: "DELETE" });
+    allQueueItems = result.items || [];
+    renderQueue();
+  } catch (error) {
+    showToast(`Error removing queue item: ${error.message}`, "error");
+  }
+}
+
+async function createPlaylistFromQueue() {
+  try {
+    showSpinner();
+    const result = await fetchAPI("/queue/create-playlist", { method: "POST" });
+    allQueueItems = result.items || [];
+    renderQueue();
+    if (result.playlist_url) {
+      window.open(result.playlist_url, "_blank", "noopener");
+    }
+    showToast(`Created playlist with ${result.added_count || 0} video${result.added_count === 1 ? "" : "s"}`, "success");
+  } catch (error) {
+    showToast(`Error creating playlist: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function castQueue() {
+  try {
+    showSpinner();
+    if (!allQueueItems.length) {
+      throw new Error("Queue is empty");
+    }
+
+    logCastDebug("Starting queue playback", {
+      queueSize: allQueueItems.length,
+      activePlayback: queuePlaybackActive,
+    });
+
+    // Step 1 – ensure Cast framework is ready and get a session
+    initializeCastFramework();
+    const session = await requestCastSession();
+    logCastDebug("Cast session obtained for queue playback");
+
+    // Step 2 – get the YouTube receiver's screenId via MDX (use cached if available)
+    const screenId = _receiverScreenId || await getYouTubeScreenId(session);
+    logCastDebug("screenId obtained", { screenId });
+
+    // Step 3 – send screenId to backend; backend creates playlist and
+    //          starts playback via the YouTube Lounge HTTP API.
+    logCastDebug("Calling backend /queue/cast with screenId");
+    const result = await fetchAPI("/queue/cast", {
+      method: "POST",
+      body: JSON.stringify({ screen_id: screenId }),
+    });
+    logCastDebug("Backend /queue/cast response", result);
+
+    if (result.error) {
+      throw new Error(result.error);
+    }
+
+    allQueueItems = result.items || allQueueItems;
+    queuePlaybackActive = true;
+    renderQueue();
+    startQueueSyncPolling();
+
+    const deviceName = session.getCastDevice ? session.getCastDevice()?.friendlyName : null;
+    updateCastReceiverStatus();
+    logCastDebug("Queue playback started via Lounge API", {
+      deviceName,
+      playlistId: result.playlist_id || null,
+      loungeSuccess: result.lounge ? result.lounge.success : null,
+      loungeVideoId: result.lounge ? result.lounge.video_id : null,
+      loungeSid: result.lounge ? result.lounge.lounge_sid : null,
+      loungeScreenId: result.lounge ? result.lounge.screen_id : null,
+    });
+
+    showToast(
+      deviceName
+        ? `Playing ${allQueueItems.length} video${allQueueItems.length === 1 ? "" : "s"} on ${deviceName}`
+        : `Playing ${allQueueItems.length} video${allQueueItems.length === 1 ? "" : "s"} via Cast`,
+      "success"
+    );
+  } catch (error) {
+    console.error("[Cast] Error starting queue playback", error);
+    const message = error && error.message ? error.message : String(error || "Unknown error");
+    showToast(`Error starting queue playback: ${message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+function startQueueSyncPolling() {
+  if (queueSyncInterval) {
+    return;
+  }
+
+  queueSyncInterval = setInterval(refreshQueueProgress, 10000);
+  refreshQueueProgress();
+}
+
+function stopQueueSyncPolling() {
+  if (queueSyncInterval) {
+    clearInterval(queueSyncInterval);
+    queueSyncInterval = null;
+  }
+  queuePlaybackActive = false;
+}
+
+async function refreshQueueProgress() {
+  if (!queuePlaybackActive) {
+    return;
+  }
+
+  try {
+    logCastDebug("Refreshing queue playback progress");
+    const result = await fetchAPI("/queue/refresh-progress", { method: "POST" });
+    allQueueItems = result.items || [];
+    logCastDebug("Queue playback progress refreshed", {
+      remainingQueueItems: allQueueItems.length,
+    });
+    renderQueue();
+
+    if (!allQueueItems.length) {
+      stopQueueSyncPolling();
+      showToast("Queue playback completed", "info");
+    }
+  } catch (error) {
+    console.error("[Cast] Error refreshing queue progress", error);
+    showToast(`Error refreshing queue progress: ${error.message}`, "error");
+    stopQueueSyncPolling();
+  }
+}
+
 async function syncSubscriptions() {
   return startFullSync(false);
 }
@@ -916,7 +1545,9 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("syncBtn").addEventListener("click", () => startFullSync(false));
 
   // Initial load
+  initializeCastFramework();
   loadCategories().then(() => loadFeeds());
+  loadQueue();
   loadSubscriptions().then(() => {
     updateUI(); // Highlight "All" filter by default
   });
@@ -932,7 +1563,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function switchSection(section) {
   document.getElementById("sectionSubscriptions").classList.toggle("d-none", section !== "subscriptions");
-  document.getElementById("sectionFeeds").classList.toggle("d-none", section !== "feeds");
+  document.getElementById("sectionFeeds").classList.toggle("d-none", section === "subscriptions");
 
   document.querySelectorAll("#mainNav .nav-link").forEach(link => {
     link.classList.toggle("active", link.dataset.section === section);
@@ -949,6 +1580,7 @@ function switchSection(section) {
   } else {
     newFeedBtn.classList.add("d-none");
     newCategoryBtn.classList.remove("d-none");
+    if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
   }
 }
 
@@ -973,17 +1605,19 @@ async function loadFeeds() {
 
 function renderFeedColumns() {
   const container = document.getElementById("feedColumns");
-
-  if (allFeeds.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state w-100">
-        <p>No feeds yet. Create one to get started!</p>
-        <button class="btn btn-primary btn-sm" onclick="openFeedModal()">+ New Feed</button>
-      </div>`;
+  if (!container) {
     return;
   }
 
-  container.innerHTML = allFeeds.map(feed => `
+  const queueColumn = renderQueueColumn();
+
+  if (allFeeds.length === 0) {
+    container.innerHTML = `${queueColumn}${renderEmptyFeedsColumn()}`;
+    renderQueue();
+    return;
+  }
+
+  container.innerHTML = `${queueColumn}${allFeeds.map(feed => `
     <div class="column-item flex-col flex-noshrink" data-feed-id="${feed.id}">
       <div class="card">
         <div class="card-header">
@@ -998,10 +1632,48 @@ function renderFeedColumns() {
         </div>
       </div>
     </div>
-  `).join("");
+  `).join("")}`;
 
   // Load videos for each feed
   allFeeds.forEach(feed => loadFeedVideos(feed.id));
+  renderQueue();
+}
+
+function renderQueueColumn() {
+  return `
+    <div class="column-item flex-col flex-noshrink" data-column-type="queue">
+      <div class="card queue-card">
+        <div class="card-header">
+          <h6 class="mb-0 fw-semibold">Queue</h6>
+          <div id="queueToolbarActions" class="action-group">
+            <span id="castReceiverStatus" class="queue-receiver-status text-muted small d-none d-md-inline"></span>
+            <button class="btn-action queue-toolbar-btn" onclick="createPlaylistFromQueue()" title="Create YouTube playlist from queue" aria-label="Create YouTube playlist from queue">
+              <span class="material-icons">playlist_add</span>
+            </button>
+            <button class="btn-action queue-toolbar-btn" onclick="castQueue()" title="Select a Google Cast receiver and start playback" aria-label="Select a Google Cast receiver and start playback">
+              <span class="material-icons">cast</span>
+            </button>
+          </div>
+        </div>
+        <div id="queueList" class="flex-fill scrollable p-2">
+          <!-- Queue items rendered here -->
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderEmptyFeedsColumn() {
+  return `
+    <div class="column-item flex-col flex-noshrink">
+      <div class="card flex-fill">
+        <div class="empty-state flex-fill d-flex flex-column justify-content-center align-items-center">
+          <p>No feeds yet. Create one to get started!</p>
+          <button class="btn btn-primary btn-sm" onclick="openFeedModal()">+ New Feed</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderFeedFilterTags(feed) {
@@ -1024,6 +1696,8 @@ function renderFeedFilterTags(feed) {
     tags.push(`<span class="material-icons md-sm">timer</span> ${min}–${max}`);
   }
   if (feed.filter_max_age_days) tags.push(`<span class="material-icons md-sm">calendar_today</span> Last ${feed.filter_max_age_days}d`);
+  if (feed.filter_play_state === "played") tags.push(`<span class="material-icons md-sm">done_all</span> Played only`);
+  if (feed.filter_play_state === "unplayed") tags.push(`<span class="material-icons md-sm">visibility_off</span> Unplayed only`);
 
   if (tags.length === 0) return "";
   return `<div class="tag-list">${tags.map(t => `<span class="tag">${t}</span>`).join("")}</div>`;
@@ -1044,20 +1718,44 @@ function findFeedCategoryById(id, categories = allCategories) {
   return null;
 }
 
-function renderVideoItem(v) {
+function renderVideoItem(v, options = {}) {
+  const showQueueAction = options.showQueueAction !== false;
+  const actionButtons = [];
+
+  if (showQueueAction) {
+    actionButtons.push(`
+      <button class="btn-action btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); addVideoToQueue('${v.video_id}')" title="Add to queue">
+        <span class="material-icons">playlist_add</span>
+      </button>
+    `);
+  }
+
+  if (options.showRemoveAction && options.queueItemId) {
+    actionButtons.push(`
+      <button class="btn-action btn-action-danger btn-action-reveal" onclick="event.preventDefault(); event.stopPropagation(); removeQueueItem(${options.queueItemId})" title="Remove from queue">
+        <span class="material-icons">close</span>
+      </button>
+    `);
+  }
+
   return `
-    <a class="list-item" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener"
-       data-video-id="${v.video_id}">
-      <div class="thumb-container">
-        <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
-        ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
+    <div class="list-item list-item-spacious video-item ${options.extraClass || ""}" data-video-id="${v.video_id}">
+      <a class="video-item-link flex-fill d-flex align-items-center gap-2 text-decoration-none text-reset" href="https://youtube.com/watch?v=${encodeURIComponent(v.video_id)}" target="_blank" rel="noopener">
+        <div class="thumb-container">
+          <img class="list-item-thumb list-item-thumb-lg" src="${v.thumbnail_url || ''}" alt="" loading="lazy">
+          ${v.duration_seconds ? `<span class="duration-badge">${formatDuration(v.duration_seconds)}</span>` : ''}
+          ${typeof v.playback_progress === "number" ? `<div class="progress-bar-container"><div class="progress-bar-fill" style="width:${Math.max(0, Math.min(100, v.playback_progress))}%"></div></div>` : ''}
+        </div>
+        <div class="list-item-info">
+          <div class="list-item-title">${v.title}</div>
+          <div class="list-item-subtitle">${v.channel_title || ''}</div>
+          <div class="list-item-meta">${v.published_at ? timeAgo(v.published_at) : ''}</div>
+        </div>
+      </a>
+      <div class="action-group video-item-actions">
+        ${actionButtons.join("")}
       </div>
-      <div class="list-item-info">
-        <div class="list-item-title">${v.title}</div>
-        <div class="list-item-subtitle">${v.channel_title || ''}</div>
-        <div class="list-item-meta">${v.published_at ? timeAgo(v.published_at) : ''}</div>
-      </div>
-    </a>
+    </div>
   `;
 }
 
@@ -1069,18 +1767,26 @@ function applyWatchedState(container, videos) {
         link.classList.add('watched');
         const thumbContainer = link.querySelector('.thumb-container');
         if (thumbContainer) {
-          const bar = document.createElement('div');
-          bar.className = 'progress-bar-container';
-          bar.innerHTML = `<div class="progress-bar-fill" style="width:100%"></div>`;
-          thumbContainer.appendChild(bar);
+          let bar = thumbContainer.querySelector('.progress-bar-container');
+          if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'progress-bar-container';
+            bar.innerHTML = `<div class="progress-bar-fill" style="width:100%"></div>`;
+            thumbContainer.appendChild(bar);
+          } else {
+            const fill = bar.querySelector('.progress-bar-fill');
+            if (fill) {
+              fill.style.width = '100%';
+            }
+          }
         }
       }
     }
   }
 }
 
-function renderVideoListContainer(videos, loadMoreEnabled) {
-  const listHtml = videos.map(renderVideoItem).join("");
+function renderVideoListContainer(videos, loadMoreEnabled, options = {}) {
+  const listHtml = videos.map((video) => renderVideoItem(video, options)).join("");
   const sentinelHtml = loadMoreEnabled
     ? `<div class="load-more-indicator d-none"><div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span>Loading more</span></div>`
     : "";
@@ -1102,7 +1808,7 @@ async function loadFeedVideos(feedId) {
       return;
     }
 
-    container.innerHTML = renderVideoListContainer(data.items, data.has_more);
+    container.innerHTML = renderVideoListContainer(data.items, data.has_more, { showQueueAction: true });
     pagination.hasMore = data.has_more;
 
     applyWatchedState(container, data.items);
@@ -1138,7 +1844,7 @@ async function loadMoreFeedVideos(feedId) {
 
     // Append new videos
     const fragment = document.createElement('div');
-    fragment.innerHTML = data.items.map(renderVideoItem).join("");
+    fragment.innerHTML = data.items.map((video) => renderVideoItem(video, { showQueueAction: true })).join("");
     while (fragment.firstChild) container.appendChild(fragment.firstChild);
 
     // Keep the spinner indicator available only while more pages remain
@@ -1206,6 +1912,7 @@ function openFeedModal(feedId = null) {
       document.getElementById("feedMinDuration").value = feed.filter_min_duration != null ? Math.round(feed.filter_min_duration / 60) : "";
       document.getElementById("feedMaxDuration").value = feed.filter_max_duration != null ? Math.round(feed.filter_max_duration / 60) : "";
       document.getElementById("feedMaxAge").value = feed.filter_max_age_days || "";
+      setFeedPlayState(feed.filter_play_state || "both");
 
       // Populate category groups
       const groups = feed.filter_category_ids || [];
@@ -1215,6 +1922,7 @@ function openFeedModal(feedId = null) {
     }
   } else {
     document.getElementById("feedForm").reset();
+    setFeedPlayState("both");
   }
 
   const deleteBtn = document.getElementById("feedDeleteBtn");
@@ -1307,6 +2015,18 @@ function renderFeedCategoryCheckboxes(categories, feedId = null, level = 0) {
   return renderGroupCategoryCheckboxes(categories, 0, level);
 }
 
+function getFeedPlayState() {
+  const selected = document.querySelector('input[name="feedPlayState"]:checked');
+  return selected ? selected.value : "both";
+}
+
+function setFeedPlayState(state) {
+  const normalizedState = ["played", "unplayed", "both"].includes(state) ? state : "both";
+  document.querySelectorAll('input[name="feedPlayState"]').forEach(input => {
+    input.checked = input.value === normalizedState;
+  });
+}
+
 async function saveFeed(e) {
   e.preventDefault();
 
@@ -1329,6 +2049,7 @@ async function saveFeed(e) {
     filter_min_duration: minDurVal ? Number(minDurVal) * 60 : null,
     filter_max_duration: maxDurVal ? Number(maxDurVal) * 60 : null,
     filter_max_age_days: document.getElementById("feedMaxAge").value ? Number(document.getElementById("feedMaxAge").value) : null,
+    filter_play_state: getFeedPlayState(),
   };
 
   try {
