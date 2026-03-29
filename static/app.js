@@ -6,6 +6,8 @@ let currentEditingCategoryId = null;
 let selectedSubscriptionIds = [];
 let draggedCategoryId = null;
 let draggedParentId = null;
+let draggedCategoryStartX = null;
+let collapsedCategoryIds = new Set();
 let currentSearchQuery = "";
 let suggestedCategoryIds = [];
 let subscriptionsLoadingMore = false;
@@ -770,6 +772,7 @@ function renderCategoriesTree(categories = allCategories, container = null, leve
     const hasChildren = category.children && category.children.length > 0;
     const isActive = category.id === selectedCategoryId;
     const isSuggested = suggestedCategoryIds.includes(category.id);
+    const isCollapsed = collapsedCategoryIds.has(category.id);
     
     // Check if all selected subscriptions are assigned to this category
     let assignmentState = "none";
@@ -789,14 +792,14 @@ function renderCategoriesTree(categories = allCategories, container = null, leve
     itemDiv.innerHTML = `
         <div class="category-node ${isActive ? "active" : ""} ${isSuggested ? "suggested-category" : ""}" draggable="true" data-category-id="${category.id}" data-parent-id="${category.parent_id || ""}">
           <div class="category-drag-handle" title="Drag to reorder"><span class="material-icons">drag_indicator</span></div>
-          ${hasSelectedSubs ? `<input type="checkbox" class="category-checkbox" data-category-id="${category.id}" ${assignmentState === "all" ? "checked" : ""} ${assignmentState === "partial" ? "data-indeterminate='true'" : ""} onclick="handleCategoryAssignment(${category.id}, event)">` : `<div class="category-toggle">${hasChildren ? '<span class="material-icons">expand_more</span>' : ""}</div>`}
+          ${hasSelectedSubs ? `<input type="checkbox" class="category-checkbox" data-category-id="${category.id}" ${assignmentState === "all" ? "checked" : ""} ${assignmentState === "partial" ? "data-indeterminate='true'" : ""} onclick="handleCategoryAssignment(${category.id}, event)">` : `<div class="category-toggle ${hasChildren ? "has-children" : ""} ${isCollapsed ? "collapsed" : ""}" data-category-id="${category.id}" role="button" tabindex="0" aria-label="${isCollapsed ? "Expand" : "Collapse"} category" aria-expanded="${!isCollapsed}">${hasChildren ? '<span class="material-icons">expand_more</span>' : ""}</div>`}
           <div class="category-name" onclick="selectCategory(${category.id})">${category.name}${isSuggested ? ' <span class="suggestion-badge"><span class="material-icons md-sm">auto_awesome</span> Suggested</span>' : ''}</div>
           <div class="action-group">
             <button class="btn-action btn-action-sm" onclick="editCategory(${category.id})" title="Edit"><span class="material-icons">edit</span></button>
             <button class="btn-action btn-action-sm btn-action-danger" onclick="deleteCategory(${category.id})" title="Delete"><span class="material-icons">delete</span></button>
           </div>
         </div>
-        ${hasChildren ? `<div class="category-children" data-category-id="${category.id}"></div>` : ""}
+        ${hasChildren ? `<div class="category-children ${isCollapsed ? "hidden" : ""}" data-category-id="${category.id}"></div>` : ""}
       `;
 
     container.appendChild(itemDiv);
@@ -809,6 +812,7 @@ function renderCategoriesTree(categories = allCategories, container = null, leve
 
   if (isRoot) {
     attachCategoryDragHandlers();
+    attachCategoryCollapseHandlers();
     // Set indeterminate state for checkboxes
     if (hasSelectedSubs) {
       container.querySelectorAll('.category-checkbox[data-indeterminate="true"]').forEach(cb => {
@@ -830,6 +834,7 @@ function attachCategoryDragHandlers() {
     if (!node) return;
     draggedCategoryId = Number(node.dataset.categoryId);
     draggedParentId = node.dataset.parentId ? Number(node.dataset.parentId) : null;
+    draggedCategoryStartX = Number.isFinite(e.clientX) ? e.clientX : null;
     node.classList.add("dragging");
     e.dataTransfer.effectAllowed = "move";
   });
@@ -837,31 +842,38 @@ function attachCategoryDragHandlers() {
   tree.addEventListener("dragover", (e) => {
     const target = e.target.closest(".category-node");
     if (!target) return;
-    const targetParentId = target.dataset.parentId ? Number(target.dataset.parentId) : null;
-    if (targetParentId !== draggedParentId) return;
     e.preventDefault();
-    target.classList.add("drop-target");
+
+    const rect = target.getBoundingClientRect();
+    const shouldNest = e.clientX > rect.left + (rect.width * 0.45);
+
+    target.classList.toggle("drop-target", !shouldNest);
+    target.classList.toggle("drop-nest-target", shouldNest);
   });
 
   tree.addEventListener("dragleave", (e) => {
     const target = e.target.closest(".category-node");
-    if (target) target.classList.remove("drop-target");
+    if (target) target.classList.remove("drop-target", "drop-nest-target");
   });
 
   tree.addEventListener("dragend", () => {
     document.querySelectorAll(".category-node").forEach((node) => {
-      node.classList.remove("dragging", "drop-target");
+      node.classList.remove("dragging", "drop-target", "drop-nest-target");
     });
     draggedCategoryId = null;
     draggedParentId = null;
+    draggedCategoryStartX = null;
   });
 
   tree.addEventListener("drop", async (e) => {
     const target = e.target.closest(".category-node");
     if (!target || draggedCategoryId === null) return;
 
+    const targetCategoryId = Number(target.dataset.categoryId);
     const targetParentId = target.dataset.parentId ? Number(target.dataset.parentId) : null;
-    if (targetParentId !== draggedParentId) return;
+    const dropOffsetX = draggedCategoryStartX === null ? 0 : e.clientX - draggedCategoryStartX;
+    const shouldNest = dropOffsetX > 24;
+    const destinationParentId = shouldNest ? targetCategoryId : targetParentId;
 
     e.preventDefault();
 
@@ -872,17 +884,73 @@ function attachCategoryDragHandlers() {
     const targetItem = target.closest(".category-item");
     if (!draggedItem || !targetItem || draggedItem === targetItem) return;
 
-    const container = getCategoryContainerForNode(target);
-    container.insertBefore(draggedItem, targetItem);
+    if (destinationParentId === draggedParentId) {
+      const container = getCategoryContainerForNode(target);
+      container.insertBefore(draggedItem, targetItem);
 
-    const orderedIds = collectOrderedIds(container);
+      const orderedIds = collectOrderedIds(container);
+      try {
+        await persistCategoryOrder(destinationParentId, orderedIds);
+        await loadCategories();
+      } catch (error) {
+        showToast(`Error updating category order: ${error.message}`, "error");
+        await loadCategories();
+      }
+      return;
+    }
+
     try {
-      await persistCategoryOrder(draggedParentId, orderedIds);
+      await fetchAPI(`/categories/${draggedCategoryId}`, {
+        method: "PUT",
+        body: JSON.stringify({ parent_id: destinationParentId }),
+      });
       await loadCategories();
     } catch (error) {
-      showToast(`Error updating category order: ${error.message}`, "error");
+      showToast(`Error moving category: ${error.message}`, "error");
       await loadCategories();
     }
+  });
+}
+
+function attachCategoryCollapseHandlers() {
+  const tree = document.getElementById("categoriesTree");
+  if (!tree || tree.dataset.collapseBound === "true") {
+    return;
+  }
+
+  tree.dataset.collapseBound = "true";
+
+  tree.addEventListener("click", (event) => {
+    const toggle = event.target.closest(".category-toggle[data-category-id]");
+    if (!toggle) {
+      return;
+    }
+
+    const categoryId = Number(toggle.dataset.categoryId);
+    const children = tree.querySelector(`.category-children[data-category-id="${CSS.escape(String(categoryId))}"]`);
+    if (!children) {
+      return;
+    }
+
+    const isCollapsed = children.classList.toggle("hidden");
+    toggle.classList.toggle("collapsed", isCollapsed);
+    toggle.setAttribute("aria-expanded", String(!isCollapsed));
+
+    if (isCollapsed) {
+      collapsedCategoryIds.add(categoryId);
+    } else {
+      collapsedCategoryIds.delete(categoryId);
+    }
+  });
+
+  tree.addEventListener("keydown", (event) => {
+    const toggle = event.target.closest(".category-toggle[data-category-id]");
+    if (!toggle || (event.key !== "Enter" && event.key !== " ")) {
+      return;
+    }
+
+    event.preventDefault();
+    toggle.click();
   });
 }
 

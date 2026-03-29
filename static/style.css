@@ -514,6 +514,12 @@ aside .card, main .card {
     outline-offset: 2px;
 }
 
+.category-node.drop-nest-target {
+    outline: 2px solid var(--md-primary-dark);
+    outline-offset: 2px;
+    transform: translateX(8px);
+}
+
 .category-drag-handle {
     cursor: grab;
     color: #999;
@@ -537,10 +543,16 @@ aside .card, main .card {
     width: 16px;
     text-align: center;
     flex-shrink: 0;
+    cursor: pointer;
 }
 
 .category-toggle .material-icons {
     font-size: 14px;
+    transition: transform 0.15s ease;
+}
+
+.category-toggle.collapsed .material-icons {
+    transform: rotate(-90deg);
 }
 
 .category-checkbox {

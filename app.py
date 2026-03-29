@@ -1219,7 +1219,12 @@ def update_category(category_id: int) -> Dict[str, Any]:
     if "parent_id" in data:
         new_parent_id = data["parent_id"]
         if new_parent_id and new_parent_id != category_id:
-            Category.query.get_or_404(new_parent_id)
+            new_parent = Category.query.get_or_404(new_parent_id)
+            ancestor = new_parent
+            while ancestor is not None:
+                if ancestor.id == category_id:
+                    return jsonify({"error": "Cannot move a category into one of its descendants"}), 400
+                ancestor = ancestor.parent
             category.parent_id = new_parent_id
         elif not new_parent_id:
             category.parent_id = None
