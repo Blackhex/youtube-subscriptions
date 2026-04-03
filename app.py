@@ -2,12 +2,13 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, cast
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from sqlalchemy import func, or_, text
 from flask_cors import CORS
 import requests
@@ -58,6 +59,20 @@ def _load_lounge_session() -> Optional[Dict[str, str]]:
     return _lounge_session
 
 
+def _is_valid_channel_id(channel_id: str) -> bool:
+    """Return True if channel_id looks like a valid YouTube channel ID (starts with 'UC', 24 chars)."""
+    return isinstance(channel_id, str) and channel_id.startswith("UC") and len(channel_id) == 24
+
+
+def _sanitize_url(url: Optional[str]) -> Optional[str]:
+    """Strip duplicate protocol prefixes like 'https:https://...'."""
+    if not url:
+        return url
+    while url.startswith("https:https://") or url.startswith("http:https://") or url.startswith("http:http://"):
+        url = url.split(":", 1)[1]
+    return url
+
+
 def get_youtube_service() -> YouTubeService:
     """Lazily initialize a thread-local YouTube service."""
     service = getattr(_youtube_service_local, "service", None)
@@ -95,6 +110,22 @@ def _cache_thumbnail(thumbnail_url: Optional[str], video_id: str) -> Optional[st
 
     extension = _thumbnail_extension(response.headers.get("Content-Type", ""), thumbnail_url)
     cached_path = THUMBNAIL_CACHE_DIR / f"{video_id}{extension}"
+    cached_path.write_bytes(response.content)
+    return str(cached_path)
+
+
+def _cache_channel_thumbnail(thumbnail_url: Optional[str], channel_id: str) -> Optional[str]:
+    """Download and cache a channel thumbnail locally."""
+    thumbnail_url = _sanitize_url(thumbnail_url)
+    if not thumbnail_url or not thumbnail_url.startswith("http"):
+        return None
+
+    THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    response = requests.get(thumbnail_url, timeout=20)
+    response.raise_for_status()
+
+    extension = _thumbnail_extension(response.headers.get("Content-Type", ""), thumbnail_url)
+    cached_path = THUMBNAIL_CACHE_DIR / f"channel_{channel_id}{extension}"
     cached_path.write_bytes(response.content)
     return str(cached_path)
 
@@ -376,9 +407,15 @@ _sync_state: Dict[str, Any] = {
 }
 
 
+_db_initialized = False
+
+
 @app.before_request
 def init_db():
     """Initialize database on first request."""
+    global _db_initialized
+    if _db_initialized:
+        return
     logger.debug(
         "Ensuring database is initialized for request method=%s path=%s",
         request.method,
@@ -390,6 +427,7 @@ def init_db():
         _initialize_category_sort_order()
         _ensure_subscription_videos_synced_at_column()
         _ensure_feed_play_state_column()
+    _db_initialized = True
 
 
 def _ensure_category_sort_order_column() -> None:
@@ -490,15 +528,19 @@ def _ensure_feed_play_state_column() -> None:
 def _sync_subscriptions_phase() -> int:
     """Fetch all subscriptions from YouTube and upsert into the DB.
 
+    Uses the Data API v3 first, then supplements with InnerTube (FEchannels)
+    to catch subscriptions the public API misses.
     Must be called inside an active app context.  Returns the count of upserted rows.
     """
     logger.info("Starting subscriptions phase")
     service = get_youtube_service()
+
+    # Phase 1a: Data API v3 (provides subscriptionId, description, subscription date)
     yt_subs = service.fetch_all_subscriptions()
-    logger.debug("Fetched %s subscriptions from YouTube", len(yt_subs))
+    logger.debug("Fetched %s subscriptions from Data API v3", len(yt_subs))
 
     synced_count = 0
-    now = datetime.utcnow()
+    now = datetime.now()
     for yt_sub in yt_subs:
         sub = Subscription.query.filter_by(channel_id=yt_sub["channelId"]).first()
         if not sub:
@@ -506,14 +548,70 @@ def _sync_subscriptions_phase() -> int:
         sub.subscription_id = yt_sub.get("subscriptionId")
         sub.channel_title = yt_sub["channelTitle"]
         sub.channel_description = yt_sub.get("channelDescription", "")
-        sub.thumbnail_url = yt_sub.get("thumbnailUrl")
+        if not sub.thumbnail_url:
+            sub.thumbnail_url = yt_sub.get("thumbnailUrl")
         sub.subscription_date = _parse_iso(yt_sub.get("subscriptionDate"))
         sub.synced_at = now
         db.session.add(sub)
         synced_count += 1
 
     db.session.commit()
-    logger.info("Subscriptions phase complete synced_count=%s", synced_count)
+    logger.info("Data API v3 phase complete synced_count=%s", synced_count)
+
+    # Phase 1b: InnerTube supplement (catches channels the public API misses)
+    try:
+        innertube_subs = service.fetch_subscriptions_innertube()
+        logger.debug("Fetched %s subscriptions from InnerTube", len(innertube_subs))
+
+        innertube_added = 0
+        innertube_new_ids: List[str] = []
+        for it_sub in innertube_subs:
+            channel_id = it_sub.get("channelId")
+            if not channel_id:
+                continue
+            existing = Subscription.query.filter_by(channel_id=channel_id).first()
+            if not existing:
+                existing = Subscription(channel_id=channel_id)
+                existing.channel_title = it_sub.get("channelTitle") or channel_id
+                if it_sub.get("thumbnailUrl"):
+                    existing.thumbnail_url = it_sub["thumbnailUrl"]
+                existing.synced_at = now
+                db.session.add(existing)
+                innertube_added += 1
+                innertube_new_ids.append(channel_id)
+            elif not existing.synced_at or existing.synced_at < now:
+                # Update title/thumbnail if the API v3 didn't already sync this channel
+                if not existing.synced_at:
+                    existing.channel_title = it_sub.get("channelTitle") or existing.channel_title
+                    if it_sub.get("thumbnailUrl") and not existing.thumbnail_url:
+                        existing.thumbnail_url = it_sub["thumbnailUrl"]
+                    existing.synced_at = now
+
+        if innertube_added:
+            db.session.commit()
+            synced_count += innertube_added
+
+        # Fetch full channel details (description, thumbnail) for InnerTube-only channels
+        if innertube_new_ids:
+            logger.debug("Fetching channel details for %s InnerTube-only channels", len(innertube_new_ids))
+            details = service.fetch_channel_details(innertube_new_ids)
+            for ch_id, info in details.items():
+                sub = Subscription.query.filter_by(channel_id=ch_id).first()
+                if sub:
+                    if info.get("title"):
+                        sub.channel_title = info["title"]
+                    if info.get("description"):
+                        sub.channel_description = info["description"]
+                    if info.get("thumbnail_url"):
+                        sub.thumbnail_url = info["thumbnail_url"]
+            db.session.commit()
+            logger.debug("Updated channel details for %s/%s channels", len(details), len(innertube_new_ids))
+
+        logger.info("InnerTube supplement complete added=%s", innertube_added)
+    except Exception:
+        logger.exception("InnerTube subscription fetch failed; continuing with Data API results only")
+
+    logger.info("Subscriptions phase complete total_synced=%s", synced_count)
     return synced_count
 
 
@@ -549,7 +647,7 @@ def _run_full_sync(force: bool = False) -> None:
             with _sync_lock:
                 _sync_state["running"] = False
                 _sync_state["phase"] = None
-                _sync_state["finished_at"] = datetime.utcnow().isoformat()
+                _sync_state["finished_at"] = datetime.now().isoformat()
                 _sync_state["current_channel"] = None
             logger.info("Full sync thread exiting")
 
@@ -578,7 +676,7 @@ def start_full_sync() -> Dict[str, Any]:
             "errors": 0,
             "skipped": 0,
             "subs_synced": 0,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now().isoformat(),
             "finished_at": None,
             "current_channel": None,
         })
@@ -676,7 +774,7 @@ def _run_video_sync_inner(channel_ids: Optional[List[str]] = None, force: bool =
                 # A feed with no category filter exists → need all subscriptions
                 subs = Subscription.query.all()
 
-        now = datetime.utcnow()
+        now = datetime.now()
         cutoff_ts = now - timedelta(seconds=SYNC_STALENESS_SECONDS)
 
         to_process: List[Subscription] = []
@@ -779,7 +877,7 @@ def _run_video_sync_inner(channel_ids: Optional[List[str]] = None, force: bool =
                 logger.exception("Failed to fetch watch progress during sync")
 
         # --- Write new videos to DB ---
-        sync_ts = datetime.utcnow()
+        sync_ts = datetime.now()
         fetched_new = 0
 
         for v in new_video_data:
@@ -855,7 +953,7 @@ def start_video_sync() -> Dict[str, Any]:
             "errors": 0,
             "skipped": 0,
             "subs_synced": 0,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now().isoformat(),
             "finished_at": None,
             "current_channel": None,
         })
@@ -868,7 +966,7 @@ def start_video_sync() -> Dict[str, Any]:
                 with _sync_lock:
                     _sync_state["running"] = False
                     _sync_state["phase"] = None
-                    _sync_state["finished_at"] = datetime.utcnow().isoformat()
+                    _sync_state["finished_at"] = datetime.now().isoformat()
 
     thread = threading.Thread(target=_video_only_thread, daemon=True, name="video-sync")
     thread.start()
@@ -1144,15 +1242,26 @@ def cast_playlist(playlist_id: str) -> Dict[str, Any]:
 
 @app.get("/api/categories")
 def get_categories() -> Dict[str, Any]:
-    """Get all root-level categories with nested children."""
+    """Get all root-level categories with nested children, plus global counts."""
     logger.debug("Handling get_categories request")
     root_categories = (
         Category.query.filter_by(parent_id=None)
         .order_by(Category.sort_order.asc(), Category.name.asc())
         .all()
     )
-    logger.debug("Returning %s root categories", len(root_categories))
-    return jsonify([cat.to_dict(include_children=True) for cat in root_categories])
+    total_count = Subscription.query.count()
+    uncategorized_count = Subscription.query.filter(~Subscription.categories.any()).count()
+    logger.debug(
+        "Returning %s root categories, total=%s, uncategorized=%s",
+        len(root_categories),
+        total_count,
+        uncategorized_count,
+    )
+    return jsonify({
+        "categories": [cat.to_dict(include_children=True) for cat in root_categories],
+        "total_count": total_count,
+        "uncategorized_count": uncategorized_count,
+    })
 
 
 @app.get("/api/categories/<int:category_id>")
@@ -1295,6 +1404,391 @@ def reorder_categories() -> Dict[str, Any]:
 
 
 # ============================================================================
+# Category Import / Export
+# ============================================================================
+
+
+@app.get("/api/categories/export")
+def export_categories() -> Response:
+    """Export categories and their subscription assignments as JSON.
+
+    Produces the YouTube Subscription Manager (PocketTube) format:
+    - Category name → list of channel IDs (sorted alphabetically by name)
+    - Large categories (>250) split into Name, Name_ysm_1, Name_ysm_2, etc.
+    - channelsHealth: channel ID → last activity ISO timestamp
+    - topicCache: channel ID → list of category names
+    - ysc_channel_metadata: all subscriptions' title/img/ts
+    - ysc_collection: category name → name mapping
+    - ysc_meta: position and icon for each category
+    - ysc_settings: sub_groups hierarchy and defaults
+    - ysc_subs_count: channel ID → subscriber count and topics
+    - ysc_title_id: channel title → channel ID mapping
+    """
+    logger.debug("Handling export_categories request")
+
+    categories = Category.query.order_by(Category.sort_order).all()
+    all_subs = Subscription.query.all()
+
+    # Build category data: split large categories into 250-item chunks
+    _YSM_CHUNK = 250
+    cat_chunks: Dict[str, List[str]] = {}
+    for cat in categories:
+        channel_ids = [sub.channel_id for sub in cat.subscriptions]
+        if len(channel_ids) <= _YSM_CHUNK:
+            cat_chunks[cat.name] = channel_ids
+        else:
+            cat_chunks[cat.name] = channel_ids[:_YSM_CHUNK]
+            for i in range(1, (len(channel_ids) - 1) // _YSM_CHUNK + 1):
+                start = i * _YSM_CHUNK
+                cat_chunks[f"{cat.name}_ysm_{i}"] = channel_ids[start : start + _YSM_CHUNK]
+
+    # Sort category keys alphabetically (PocketTube ordering)
+    result: Dict[str, Any] = {}
+    for key in sorted(cat_chunks.keys()):
+        result[key] = cat_chunks[key]
+
+    # channelsHealth: channel ID → last activity ISO timestamp
+    # Start from saved PocketTube data
+    channels_health: Dict[str, str] = {}
+    for sub in all_subs:
+        if _is_valid_channel_id(sub.channel_id) and sub.last_published_at:
+            channels_health[sub.channel_id] = sub.last_published_at
+    # Override with actual video data when available (more recent wins)
+    latest_videos = (
+        db.session.query(Video.channel_id, func.max(Video.published_at))
+        .group_by(Video.channel_id)
+        .all()
+    )
+    for channel_id, last_published in latest_videos:
+        if last_published and _is_valid_channel_id(channel_id):
+            video_ts = last_published.isoformat() + "+00:00"
+            existing = channels_health.get(channel_id, "")
+            if not existing or video_ts > existing:
+                channels_health[channel_id] = video_ts
+    result["channelsHealth"] = dict(sorted(channels_health.items()))
+
+    # topicCache: channel ID → list of PocketTube topics
+    # Only include entries that originally came from topicCache (not ysc_subs_count.t)
+    # to preserve round-trip fidelity.
+    topic_cache: Dict[str, List[str]] = {}
+    for sub in all_subs:
+        if _is_valid_channel_id(sub.channel_id) and sub.topics and sub.topic_in_topic_cache:
+            try:
+                topics = json.loads(sub.topics)
+                if topics:
+                    topic_cache[sub.channel_id] = topics
+            except (json.JSONDecodeError, TypeError):
+                pass
+    result["topicCache"] = dict(sorted(topic_cache.items()))
+
+    # ysc_channel_metadata: include ALL subscriptions with valid channel IDs
+    channel_meta: Dict[str, Dict[str, Any]] = {}
+    for sub in all_subs:
+        if not _is_valid_channel_id(sub.channel_id):
+            logger.debug("Skipping invalid channel_id in export: %s", sub.channel_id)
+            continue
+        channel_meta[sub.channel_id] = {
+            "img": sub.thumbnail_url or "",
+            "title": sub.channel_title,
+            "ts": 0,
+        }
+    result["ysc_channel_metadata"] = dict(sorted(channel_meta.items()))
+
+    # ysc_collection: category name → category name
+    ysc_collection: Dict[str, str] = {}
+    for cat in categories:
+        ysc_collection[cat.name] = cat.name
+    result["ysc_collection"] = dict(sorted(ysc_collection.items()))
+
+    # ysc_meta: position and icon per category
+    ysc_meta: Dict[str, Dict[str, Any]] = {}
+    for cat in categories:
+        ysc_meta[cat.name] = {
+            "img": "/icon/new_pack/_52.png",
+            "position": cat.sort_order,
+        }
+    result["ysc_meta"] = dict(sorted(ysc_meta.items()))
+
+    # ysc_settings: sub_groups hierarchy
+    sub_groups: Dict[str, Dict] = {}
+    cat_by_id: Dict[int, Category] = {c.id: c for c in categories}
+    # First pass: identify root categories (no parent or parent not in DB)
+    root_cats = [c for c in categories if c.parent_id is None]
+    for root in root_cats:
+        children = {c.name: {} for c in categories if c.parent_id == root.id}
+        sub_groups[root.name] = children
+    result["ysc_settings"] = {"sub_groups": dict(sorted(sub_groups.items()))}
+
+    # ysc_subs_count: channel ID → {sc: subscriber count, t: [topics]} (from DB)
+    ysc_subs_count: Dict[str, Dict[str, Any]] = {}
+    for sub in all_subs:
+        if _is_valid_channel_id(sub.channel_id):
+            topics: List[str] = []
+            if sub.topics:
+                try:
+                    topics = json.loads(sub.topics)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            entry: Dict[str, Any] = {}
+            if sub.subscriber_count:
+                entry["sc"] = sub.subscriber_count
+            entry["t"] = topics
+            ysc_subs_count[sub.channel_id] = entry
+    result["ysc_subs_count"] = dict(sorted(ysc_subs_count.items()))
+
+    # ysc_title_id: channel title → channel ID
+    ysc_title_id: Dict[str, str] = {}
+    for sub in all_subs:
+        if _is_valid_channel_id(sub.channel_id):
+            ysc_title_id[sub.channel_title] = sub.channel_id
+    result["ysc_title_id"] = dict(sorted(ysc_title_id.items()))
+
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H_%M")
+    filename = f"categories_export_{timestamp}.json"
+
+    logger.debug(
+        "Exporting %s categories (%s keys after chunking) with %s total subscriptions",
+        len(categories),
+        len(cat_chunks),
+        len(channel_meta),
+    )
+    return Response(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/categories/import")
+def import_categories() -> Dict[str, Any]:
+    """Import categories from a YouTube Subscription Manager JSON file.
+
+    Expects multipart/form-data with a 'file' field containing the JSON.
+    Creates missing categories and assigns existing subscriptions.
+    """
+    logger.debug("Handling import_categories request")
+
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify({"error": "No file provided"}), 400
+
+    try:
+        raw = uploaded.read()
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.debug("import_categories rejected: invalid JSON (%s)", exc)
+        return jsonify({"error": "Invalid JSON file"}), 400
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+
+    # Identify category keys: values that are lists of channel-ID strings
+    # Merge "Name_ysm_N" continuation keys into the base "Name" category.
+    category_entries: Dict[str, List[str]] = {}
+    for key, value in data.items():
+        if (
+            isinstance(value, list)
+            and value
+            and all(isinstance(v, str) for v in value)
+            and value[0].startswith("UC")
+        ):
+            base_name = re.sub(r"_ysm_\d+$", "", key)
+            if base_name in category_entries:
+                category_entries[base_name].extend(value)
+            else:
+                category_entries[base_name] = list(value)
+
+    if not category_entries:
+        return jsonify({"error": "No categories found in file"}), 400
+
+    # Extract hierarchy from ysc_settings.sub_groups (nested dict)
+    sub_groups = (data.get("ysc_settings") or {}).get("sub_groups", {})
+    # Extract sort positions from ysc_meta
+    ysc_meta = data.get("ysc_meta", {})
+
+    # Build parent mapping: child_name -> parent_name
+    parent_map: Dict[str, Optional[str]] = {}
+
+    def _walk_groups(groups: dict, parent_name: Optional[str] = None) -> None:
+        for name, children in groups.items():
+            parent_map[name] = parent_name
+            if isinstance(children, dict) and children:
+                _walk_groups(children, name)
+
+    _walk_groups(sub_groups)
+
+    # Ensure parent categories from sub_groups exist in category_entries
+    # even if they have no direct subscriptions (e.g. "Fun" parent).
+    for name in sub_groups:
+        if name not in category_entries:
+            category_entries[name] = []
+
+    # Build a channel_id → Subscription lookup from existing DB rows
+    all_subs = {sub.channel_id: sub for sub in Subscription.query.all()}
+
+    # Create Subscription records for channels in ysc_channel_metadata
+    # that the YouTube API didn't return (known API limitation).
+    channel_metadata = data.get("ysc_channel_metadata", {})
+    created_subscriptions = 0
+    now = datetime.now()
+
+    # Collect all channel IDs: from categories + channel metadata + other PocketTube dicts
+    all_known_channels: set = set(channel_metadata.keys())
+    for ch_list in category_entries.values():
+        all_known_channels.update(ch_list)
+    # Also include channels from ysc_subs_count, channelsHealth, ysc_title_id, topicCache
+    all_known_channels.update(data.get("ysc_subs_count", {}).keys())
+    all_known_channels.update(data.get("channelsHealth", {}).keys())
+    all_known_channels.update(data.get("topicCache", {}).keys())
+    title_id = data.get("ysc_title_id", {})
+    all_known_channels.update(title_id.values())
+
+    # Build reverse lookup: channel_id → title from ysc_title_id
+    id_to_title: Dict[str, str] = {cid: title for title, cid in title_id.items()}
+
+    for ch_id in all_known_channels:
+        if not _is_valid_channel_id(ch_id):
+            logger.debug("Skipping invalid channel_id in import: %s", ch_id)
+            continue
+        if ch_id not in all_subs:
+            meta_entry = channel_metadata.get(ch_id, {})
+            title = meta_entry.get("title") or id_to_title.get(ch_id) or ch_id
+            thumbnail = meta_entry.get("img", "")
+            sub = Subscription(
+                channel_id=ch_id,
+                channel_title=title,
+                thumbnail_url=thumbnail or None,
+                created_at=now,
+            )
+            db.session.add(sub)
+            db.session.flush()
+            all_subs[ch_id] = sub
+            created_subscriptions += 1
+
+    logger.debug("Created %s subscriptions from channel metadata", created_subscriptions)
+
+    # Build a name → Category lookup for existing categories
+    existing_cats = {cat.name: cat for cat in Category.query.all()}
+
+    created_categories = 0
+    assignments_added = 0
+    unmatched_channels = 0
+
+    def _get_or_create_category(name: str) -> Category:
+        """Get existing category or create it, respecting parent hierarchy."""
+        nonlocal created_categories
+        if name in existing_cats:
+            return existing_cats[name]
+
+        parent_name = parent_map.get(name)
+        parent_id = None
+        if parent_name and (parent_name in category_entries or parent_name in existing_cats):
+            parent_cat = _get_or_create_category(parent_name)
+            parent_id = parent_cat.id
+
+        # Use ysc_meta position for sort_order, fallback to next available
+        meta_entry = ysc_meta.get(name, {})
+        sort_order = meta_entry.get("position")
+        if sort_order is None:
+            max_sort = (
+                db.session.query(db.func.max(Category.sort_order))
+                .filter(Category.parent_id == parent_id)
+                .scalar()
+            )
+            sort_order = (max_sort or 0) + 1
+
+        category = Category(
+            name=name,
+            parent_id=parent_id,
+            sort_order=sort_order,
+        )
+        db.session.add(category)
+        db.session.flush()
+        existing_cats[name] = category
+        created_categories += 1
+        return category
+
+    for cat_name, channel_ids in category_entries.items():
+        category = _get_or_create_category(cat_name)
+
+        # Assign subscriptions with position to preserve ordering
+        current_sub_ids = {sub.channel_id for sub in category.subscriptions}
+        for pos, ch_id in enumerate(channel_ids):
+            if ch_id in all_subs:
+                if ch_id not in current_sub_ids:
+                    db.session.execute(
+                        subscription_category.insert().values(
+                            subscription_id=all_subs[ch_id].id,
+                            category_id=category.id,
+                            position=pos,
+                        )
+                    )
+                    assignments_added += 1
+            else:
+                unmatched_channels += 1
+
+    db.session.commit()
+
+    # Save PocketTube data: topics, subscriber counts, channelsHealth
+    ysc_subs_count = data.get("ysc_subs_count", {})
+    topic_cache = data.get("topicCache", {})
+    channels_health = data.get("channelsHealth", {})
+    for ch_id, sub in all_subs.items():
+        # Update channel title from ysc_title_id (current YouTube-visible name)
+        visible_title = id_to_title.get(ch_id)
+        if visible_title:
+            sub.channel_title = visible_title
+        # Prefer topicCache for topics, fall back to ysc_subs_count.t
+        topics = topic_cache.get(ch_id)
+        from_topic_cache = bool(topics)
+        if not topics:
+            sc_entry = ysc_subs_count.get(ch_id, {})
+            topics = sc_entry.get("t") if isinstance(sc_entry, dict) else None
+        if topics and isinstance(topics, list):
+            sub.topics = json.dumps(topics)
+            sub.topic_in_topic_cache = from_topic_cache
+        # Save subscriber count from ysc_subs_count
+        sc_entry = ysc_subs_count.get(ch_id, {})
+        if isinstance(sc_entry, dict) and sc_entry.get("sc"):
+            sub.subscriber_count = sc_entry["sc"]
+        # Save channelsHealth (last video published date)
+        health_ts = channels_health.get(ch_id)
+        if health_ts and isinstance(health_ts, str):
+            sub.last_published_at = health_ts
+
+    db.session.commit()
+
+    # Backfill channel details (thumbnail) for subscriptions
+    # that were not synced from the YouTube API, using import metadata.
+    unsynced_subs = Subscription.query.filter(Subscription.synced_at == None).all()  # noqa: E711
+    if unsynced_subs:
+        for sub in unsynced_subs:
+            meta_entry = channel_metadata.get(sub.channel_id)
+            if meta_entry:
+                if not sub.channel_title or sub.channel_title == sub.channel_id:
+                    sub.channel_title = meta_entry.get("title") or sub.channel_title
+                if not sub.thumbnail_url:
+                    sub.thumbnail_url = meta_entry.get("img") or None
+
+        db.session.commit()
+
+    logger.debug(
+        "Import complete: created=%s categories, %s subscriptions, assigned=%s, unmatched=%s",
+        created_categories,
+        created_subscriptions,
+        assignments_added,
+        unmatched_channels,
+    )
+    return jsonify({
+        "message": "Import complete",
+        "created_categories": created_categories,
+        "created_subscriptions": created_subscriptions,
+        "assignments_added": assignments_added,
+        "unmatched_channels": unmatched_channels,
+    }), 200
+
+
+# ============================================================================
 # Subscription API Endpoints
 # ============================================================================
 
@@ -1378,7 +1872,17 @@ def assign_subscription_to_category(sub_id: int, cat_id: int) -> Dict[str, Any]:
     cat = Category.query.get_or_404(cat_id)
 
     if cat not in sub.categories:
-        sub.categories.append(cat)
+        max_pos = db.session.execute(
+            db.select(db.func.max(subscription_category.c.position))
+            .where(subscription_category.c.category_id == cat.id)
+        ).scalar() or -1
+        db.session.execute(
+            subscription_category.insert().values(
+                subscription_id=sub.id,
+                category_id=cat.id,
+                position=max_pos + 1,
+            )
+        )
         db.session.commit()
         logger.debug("Assigned subscription id=%s to category id=%s", sub_id, cat_id)
     else:
@@ -1715,7 +2219,7 @@ def get_feed_videos(feed_id: int):
     # Filter by age
     if feed.filter_max_age_days is not None:
         logger.debug("Applying max age filter for feed_id=%s days=%s", feed_id, feed.filter_max_age_days)
-        cutoff = datetime.utcnow() - timedelta(days=feed.filter_max_age_days)
+        cutoff = datetime.now() - timedelta(days=feed.filter_max_age_days)
         query = query.filter(Video.published_at >= cutoff)
 
     if feed.filter_play_state == "played":
@@ -1950,6 +2454,33 @@ def get_video_thumbnail(video_id: str):
     return send_from_directory(str(thumbnail_path.parent), thumbnail_path.name)
 
 
+@app.get("/api/subscriptions/<string:channel_id>/thumbnail")
+def get_channel_thumbnail(channel_id: str) -> Response:
+    """Serve a cached thumbnail for a subscription channel."""
+    logger.debug("Handling get_channel_thumbnail channel_id=%s", channel_id)
+    sub = Subscription.query.filter_by(channel_id=channel_id).first_or_404()
+
+    if not sub.thumbnail_path:
+        logger.debug("Channel thumbnail not cached yet for channel_id=%s; caching now", channel_id)
+        try:
+            cached_path = _cache_channel_thumbnail(sub.thumbnail_url, sub.channel_id)
+            if not cached_path:
+                return jsonify({"error": "Thumbnail not available"}), 404
+            sub.thumbnail_path = cached_path
+            db.session.commit()
+        except Exception:
+            logger.exception("Failed to cache channel thumbnail for channel_id=%s", channel_id)
+            db.session.rollback()
+            return jsonify({"error": "Thumbnail not cached"}), 404
+
+    thumbnail_path = Path(sub.thumbnail_path)
+    if not thumbnail_path.exists():
+        logger.debug("Cached channel thumbnail missing for channel_id=%s path=%s", channel_id, sub.thumbnail_path)
+        return jsonify({"error": "Thumbnail not found"}), 404
+
+    return send_from_directory(str(thumbnail_path.parent), thumbnail_path.name)
+
+
 # ============================================================================
 # Video Endpoints
 # ============================================================================
@@ -1975,7 +2506,7 @@ def fetch_videos():
             "errors": 0,
             "skipped": 0,
             "subs_synced": 0,
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": datetime.now().isoformat(),
             "finished_at": None,
             "current_channel": None,
         })
@@ -1988,7 +2519,7 @@ def fetch_videos():
                 with _sync_lock:
                     _sync_state["running"] = False
                     _sync_state["phase"] = None
-                    _sync_state["finished_at"] = datetime.utcnow().isoformat()
+                    _sync_state["finished_at"] = datetime.now().isoformat()
 
     thread = threading.Thread(target=_legacy_video_thread, daemon=True, name="video-sync-legacy")
     thread.start()

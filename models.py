@@ -15,8 +15,8 @@ class Category(db.Model):
     description = db.Column(db.Text, nullable=True)
     parent_id = db.Column(db.Integer, db.ForeignKey("categories.id"), nullable=True)
     sort_order = db.Column(db.Integer, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Self-referential relationship (one-to-many with orphan cleanup)
     children = db.relationship(
@@ -32,6 +32,7 @@ class Category(db.Model):
         "Subscription",
         secondary="subscription_category",
         backref="categories",
+        order_by="subscription_category.c.position",
     )
 
     def to_dict(self, include_children=False):
@@ -42,6 +43,7 @@ class Category(db.Model):
             "description": self.description,
             "parent_id": self.parent_id,
             "sort_order": self.sort_order,
+            "subscription_count": len(self.subscriptions),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -61,19 +63,27 @@ class Subscription(db.Model):
     channel_title = db.Column(db.String(256), nullable=False)
     channel_description = db.Column(db.Text, nullable=True)
     thumbnail_url = db.Column(db.String(512), nullable=True)
+    thumbnail_path = db.Column(db.String(512), nullable=True)
     subscription_date = db.Column(db.DateTime, nullable=True)
+    subscriber_count = db.Column(db.String(32), nullable=True)  # PocketTube subscriber count
+    topics = db.Column(db.Text, nullable=True)  # PocketTube topics (JSON array)
+    topic_in_topic_cache = db.Column(db.Boolean, nullable=False, default=False)  # True if topics originated from topicCache
+    last_published_at = db.Column(db.String(64), nullable=True)  # Last video published ISO timestamp
     synced_at = db.Column(db.DateTime, nullable=True)
     videos_synced_at = db.Column(db.DateTime, nullable=True)  # When videos were last fetched
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
     def to_dict(self, include_categories=False):
         """Convert to dictionary for JSON serialization."""
+        thumbnail_url = None
+        if self.thumbnail_url or self.thumbnail_path:
+            thumbnail_url = f"/api/subscriptions/{self.channel_id}/thumbnail"
         data = {
             "id": self.id,
             "channel_id": self.channel_id,
             "channel_title": self.channel_title,
             "channel_description": self.channel_description,
-            "thumbnail_url": self.thumbnail_url,
+            "thumbnail_url": thumbnail_url,
             "subscription_date": self.subscription_date.isoformat()
             if self.subscription_date
             else None,
@@ -88,6 +98,7 @@ subscription_category = db.Table(
     "subscription_category",
     db.Column("subscription_id", db.Integer, db.ForeignKey("subscriptions.id"), primary_key=True),
     db.Column("category_id", db.Integer, db.ForeignKey("categories.id"), primary_key=True),
+    db.Column("position", db.Integer, nullable=True),
 )
 
 
@@ -107,7 +118,7 @@ class Video(db.Model):
     duration_seconds = db.Column(db.Integer, nullable=True)
     video_type = db.Column(db.String(32), nullable=True)  # video, short, live
     playback_progress = db.Column(db.Integer, nullable=True)  # percent watched 0-100
-    fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+    fetched_at = db.Column(db.DateTime, default=datetime.now)
 
     subscription = db.relationship("Subscription", backref="videos", foreign_keys=[channel_id], primaryjoin="Video.channel_id == Subscription.channel_id")
 
@@ -139,7 +150,7 @@ class QueueItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     video_id = db.Column(db.String(32), db.ForeignKey("videos.video_id"), nullable=False, unique=True)
     sort_order = db.Column(db.Integer, nullable=False)
-    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    added_at = db.Column(db.DateTime, default=datetime.now)
 
     video = db.relationship("Video", foreign_keys=[video_id])
 
@@ -162,8 +173,8 @@ class Feed(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(256), nullable=False)
     sort_order = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
     # Filter criteria stored as JSON
     filter_category_ids = db.Column(db.Text, nullable=True)  # JSON: array of arrays (AND of OR groups)

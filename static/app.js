@@ -1,5 +1,7 @@
 // Global state
 let allCategories = [];
+let totalSubscriptionCount = 0;
+let uncategorizedSubscriptionCount = 0;
 let allSubscriptions = [];
 let selectedCategoryId = null;
 let currentEditingCategoryId = null;
@@ -716,6 +718,8 @@ async function loadCategories() {
     showSpinner();
     const payload = await fetchAPI("/categories");
     allCategories = extractCategoriesPayload(payload);
+    totalSubscriptionCount = payload.total_count ?? 0;
+    uncategorizedSubscriptionCount = payload.uncategorized_count ?? 0;
     renderCategoriesTree();
     renderCategoryParentSelect();
   } catch (error) {
@@ -738,6 +742,12 @@ function renderCategoriesTree(categories = allCategories, container = null, leve
   
   // Show/hide suggestions button based on selection
   if (isRoot) {
+    // Update All / Uncategorized counts
+    const countAllEl = document.getElementById("countAll");
+    const countUncatEl = document.getElementById("countUncategorized");
+    if (countAllEl) countAllEl.textContent = totalSubscriptionCount;
+    if (countUncatEl) countUncatEl.textContent = uncategorizedSubscriptionCount;
+
     const suggestionsBtn = document.getElementById("getSuggestionsBtn");
     if (suggestionsBtn) {
       if (hasSingleSelection) {
@@ -793,7 +803,7 @@ function renderCategoriesTree(categories = allCategories, container = null, leve
         <div class="category-node ${isActive ? "active" : ""} ${isSuggested ? "suggested-category" : ""}" draggable="true" data-category-id="${category.id}" data-parent-id="${category.parent_id || ""}">
           <div class="category-drag-handle" title="Drag to reorder"><span class="material-icons">drag_indicator</span></div>
           ${hasSelectedSubs ? `<input type="checkbox" class="category-checkbox" data-category-id="${category.id}" ${assignmentState === "all" ? "checked" : ""} ${assignmentState === "partial" ? "data-indeterminate='true'" : ""} onclick="handleCategoryAssignment(${category.id}, event)">` : `<div class="category-toggle ${hasChildren ? "has-children" : ""} ${isCollapsed ? "collapsed" : ""}" data-category-id="${category.id}" role="button" tabindex="0" aria-label="${isCollapsed ? "Expand" : "Collapse"} category" aria-expanded="${!isCollapsed}">${hasChildren ? '<span class="material-icons">expand_more</span>' : ""}</div>`}
-          <div class="category-name" onclick="selectCategory(${category.id})">${category.name}${isSuggested ? ' <span class="suggestion-badge"><span class="material-icons md-sm">auto_awesome</span> Suggested</span>' : ''}</div>
+          <div class="category-name" onclick="selectCategory(${category.id})">${category.name}<span class="category-count ms-1">${category.subscription_count ?? ''}</span>${isSuggested ? ' <span class="suggestion-badge"><span class="material-icons md-sm">auto_awesome</span> Suggested</span>' : ''}</div>
           <div class="action-group">
             <button class="btn-action btn-action-sm" onclick="editCategory(${category.id})" title="Edit"><span class="material-icons">edit</span></button>
             <button class="btn-action btn-action-sm btn-action-danger" onclick="deleteCategory(${category.id})" title="Delete"><span class="material-icons">delete</span></button>
@@ -1138,6 +1148,84 @@ async function deleteCategory(categoryId) {
 }
 
 // ============================================================================
+// Category Import / Export
+// ============================================================================
+
+async function exportCategories() {
+  try {
+    showSpinner();
+    const response = await fetch(`${API_BASE}/categories/export`);
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || `Export failed: ${response.status}`);
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : "categories_export.json";
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("Categories exported", "success");
+  } catch (error) {
+    showToast(`Export error: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function importCategories(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  // Reset so the same file can be re-selected
+  event.target.value = "";
+
+  const ok = await showConfirm(
+    "Import categories from this file? New categories will be created and subscriptions assigned to matching channels.",
+    "Import Categories"
+  );
+  if (!ok) return;
+
+  try {
+    showSpinner();
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${API_BASE}/categories/import`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || `Import failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    await loadCategories();
+    await loadSubscriptions();
+
+    const parts = [];
+    if (result.created_categories) parts.push(`${result.created_categories} new categories`);
+    if (result.created_subscriptions) parts.push(`${result.created_subscriptions} new subscriptions`);
+    if (result.assignments_added) parts.push(`${result.assignments_added} assignments`);
+    if (result.updated_channels) parts.push(`${result.updated_channels} channels updated`);
+    showToast(`Import complete: ${parts.join(", ") || "no changes"}`, "success");
+  } catch (error) {
+    showToast(`Import error: ${error.message}`, "error");
+  } finally {
+    hideSpinner();
+  }
+}
+
+// ============================================================================
 // Subscription functions
 // ============================================================================
 
@@ -1188,10 +1276,12 @@ async function loadMoreSubscriptions() {
         return `
         <div class="list-item subscription-item ${isSelected ? "selected" : ""}" data-subscription-id="${sub.id}" onclick="toggleSubscriptionSelection(${sub.id}, event)">
             <input type="checkbox" class="list-item-checkbox" ${isSelected ? "checked" : ""} onclick="event.stopPropagation(); toggleSubscriptionSelection(${sub.id}, event)">
-            <img src="${sub.thumbnail_url || 'https://via.placeholder.com/80'}" 
+            <img src="${sub.thumbnail_url || ''}" 
                  alt="${sub.channel_title}" 
-                 class="list-item-thumb subscription-thumbnail">
-            <div class="list-item-info">
+                 class="list-item-thumb subscription-thumbnail"
+                 onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+            <span class="material-icons list-item-thumb subscription-thumbnail subscription-thumb-fallback" style="display:none">account_circle</span>
+            <div class="list-item-info" onclick="event.stopPropagation(); window.open('https://www.youtube.com/channel/${sub.channel_id}', '_blank')">
                 <div class="list-item-title">${sub.channel_title}</div>
                 <div class="list-item-subtitle">${sub.channel_description || "No description"}</div>
                 <div class="list-item-meta">
@@ -1258,10 +1348,12 @@ function renderSubscriptions(subscriptions = allSubscriptions) {
         return `
         <div class="list-item subscription-item ${isSelected ? "selected" : ""}" data-subscription-id="${sub.id}" onclick="toggleSubscriptionSelection(${sub.id}, event)">
             <input type="checkbox" class="list-item-checkbox" ${isSelected ? "checked" : ""} onclick="event.stopPropagation(); toggleSubscriptionSelection(${sub.id}, event)">
-            <img src="${sub.thumbnail_url || 'https://via.placeholder.com/80'}" 
+            <img src="${sub.thumbnail_url || ''}" 
                  alt="${sub.channel_title}" 
-                 class="list-item-thumb subscription-thumbnail">
-            <div class="list-item-info">
+                 class="list-item-thumb subscription-thumbnail"
+                 onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+            <span class="material-icons list-item-thumb subscription-thumbnail subscription-thumb-fallback" style="display:none">account_circle</span>
+            <div class="list-item-info" onclick="event.stopPropagation(); window.open('https://www.youtube.com/channel/${sub.channel_id}', '_blank')">
                 <div class="list-item-title">${sub.channel_title}</div>
                 <div class="list-item-subtitle">${sub.channel_description || "No description"}</div>
                 <div class="list-item-meta">
@@ -1622,8 +1714,8 @@ function getFilteredSubscriptions() {
   }
   return allSubscriptions.filter(
     (sub) =>
-      sub.channel_title.toLowerCase().includes(currentSearchQuery) ||
-      sub.channel_description.toLowerCase().includes(currentSearchQuery)
+      (sub.channel_title || "").toLowerCase().includes(currentSearchQuery) ||
+      (sub.channel_description || "").toLowerCase().includes(currentSearchQuery)
   );
 }
 
@@ -1730,6 +1822,13 @@ document.addEventListener("DOMContentLoaded", () => {
   // Suggestions button
   document.getElementById("getSuggestionsBtn").addEventListener("click", fetchAISuggestions);
 
+  // Import / Export categories
+  document.getElementById("exportCategoriesBtn").addEventListener("click", exportCategories);
+  document.getElementById("importCategoriesBtn").addEventListener("click", () => {
+    document.getElementById("importCategoriesFile").click();
+  });
+  document.getElementById("importCategoriesFile").addEventListener("change", importCategories);
+
   // Unified sync button (navbar)
   document.getElementById("syncBtn").addEventListener("click", () => startFullSync(false));
 
@@ -1744,7 +1843,56 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Restore sync progress if a sync is already running
   _checkAndRestoreSync();
+
+  // Sidebar resizer
+  initSidebarResizer();
 });
+
+// ============================================================================
+// Sidebar Resizer
+// ============================================================================
+
+const SIDEBAR_WIDTH_KEY = "categoriesSidebarWidth";
+
+function initSidebarResizer() {
+  const sidebar = document.getElementById("categoriesSidebar");
+  const resizer = document.getElementById("sidebarResizer");
+  if (!sidebar || !resizer) return;
+
+  // Restore persisted width
+  const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (saved) {
+    sidebar.style.width = saved + "px";
+  }
+
+  let startX = 0;
+  let startWidth = 0;
+
+  function onMouseMove(e) {
+    const newWidth = Math.max(120, Math.min(startWidth + (e.clientX - startX), window.innerWidth * 0.5));
+    sidebar.style.width = newWidth + "px";
+  }
+
+  function onMouseUp() {
+    resizer.classList.remove("active");
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, parseInt(sidebar.style.width, 10));
+  }
+
+  resizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startX = e.clientX;
+    startWidth = sidebar.offsetWidth;
+    resizer.classList.add("active");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
 
 // ============================================================================
 // Section Navigation
@@ -1762,20 +1910,28 @@ function switchSection(section) {
   const newFeedBtn = document.getElementById("newFeedBtn");
   const newCategoryBtn = document.getElementById("newCategoryBtn");
   const suggestionsBtn = document.getElementById("getSuggestionsBtn");
+  const exportBtn = document.getElementById("exportCategoriesBtn");
+  const importBtn = document.getElementById("importCategoriesBtn");
   if (section === "feeds") {
     newFeedBtn.classList.remove("d-none");
     newCategoryBtn.classList.add("d-none");
     if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
+    exportBtn.classList.add("d-none");
+    importBtn.classList.add("d-none");
     loadFeeds();
   } else if (section === "playlists") {
     newFeedBtn.classList.add("d-none");
     newCategoryBtn.classList.add("d-none");
     if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
+    exportBtn.classList.add("d-none");
+    importBtn.classList.add("d-none");
     loadPlaylists();
   } else {
     newFeedBtn.classList.add("d-none");
     newCategoryBtn.classList.remove("d-none");
     if (suggestionsBtn) suggestionsBtn.classList.add("d-none");
+    exportBtn.classList.remove("d-none");
+    importBtn.classList.remove("d-none");
   }
 }
 

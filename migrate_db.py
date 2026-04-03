@@ -99,7 +99,90 @@ def _migrate_file(db_path):
                 logger.info("filter_play_state backfill complete")
         else:
             logger.info("filter_play_state column already exists")
-        
+
+        # Migrate subscriptions table - add thumbnail_path
+        cursor.execute("PRAGMA table_info(subscriptions)")
+        sub_columns = [col[1] for col in cursor.fetchall()]
+        logger.debug("Fetched %s subscription columns for thumbnail_path check", len(sub_columns))
+
+        if 'thumbnail_path' not in sub_columns:
+            logger.info("Adding thumbnail_path column to subscriptions table")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN thumbnail_path VARCHAR(512)")
+            conn.commit()
+            logger.info("thumbnail_path column added successfully")
+        else:
+            logger.info("thumbnail_path column already exists")
+
+        # Migrate subscription_category table - add position
+        cursor.execute("PRAGMA table_info(subscription_category)")
+        sc_columns = [col[1] for col in cursor.fetchall()]
+        logger.debug("Fetched %s subscription_category columns", len(sc_columns))
+
+        if 'position' not in sc_columns:
+            logger.info("Adding position column to subscription_category table")
+            cursor.execute("ALTER TABLE subscription_category ADD COLUMN position INTEGER")
+            conn.commit()
+            logger.info("position column added successfully")
+
+            # Backfill positions using ROWID order per category
+            logger.info("Backfilling position values for existing associations")
+            cursor.execute("""
+                UPDATE subscription_category
+                SET position = (
+                    SELECT cnt FROM (
+                        SELECT subscription_id, category_id,
+                               ROW_NUMBER() OVER (PARTITION BY category_id ORDER BY ROWID) - 1 AS cnt
+                        FROM subscription_category
+                    ) sub
+                    WHERE sub.subscription_id = subscription_category.subscription_id
+                      AND sub.category_id = subscription_category.category_id
+                )
+            """)
+            conn.commit()
+            logger.info("position backfill complete")
+        else:
+            logger.info("position column already exists")
+
+        # Migrate subscriptions table - add subscriber_count and topics (PocketTube data)
+        cursor.execute("PRAGMA table_info(subscriptions)")
+        sub_columns2 = [col[1] for col in cursor.fetchall()]
+
+        if 'subscriber_count' not in sub_columns2:
+            logger.info("Adding subscriber_count column to subscriptions table")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN subscriber_count VARCHAR(32)")
+            conn.commit()
+            logger.info("subscriber_count column added successfully")
+        else:
+            logger.info("subscriber_count column already exists")
+
+        if 'topics' not in sub_columns2:
+            logger.info("Adding topics column to subscriptions table")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN topics TEXT")
+            conn.commit()
+            logger.info("topics column added successfully")
+        else:
+            logger.info("topics column already exists")
+
+        if 'last_published_at' not in sub_columns2:
+            logger.info("Adding last_published_at column to subscriptions table")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN last_published_at VARCHAR(64)")
+            conn.commit()
+            logger.info("last_published_at column added successfully")
+        else:
+            logger.info("last_published_at column already exists")
+
+        # Migrate subscriptions table - add topic_in_topic_cache
+        cursor.execute("PRAGMA table_info(subscriptions)")
+        sub_columns3 = [col[1] for col in cursor.fetchall()]
+
+        if 'topic_in_topic_cache' not in sub_columns3:
+            logger.info("Adding topic_in_topic_cache column to subscriptions table")
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN topic_in_topic_cache BOOLEAN DEFAULT 0")
+            conn.commit()
+            logger.info("topic_in_topic_cache column added successfully")
+        else:
+            logger.info("topic_in_topic_cache column already exists")
+
         conn.close()
         logger.debug("Closed database connection for db_path=%s", db_path)
         

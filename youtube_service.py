@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 import requests as http_requests
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -67,8 +68,16 @@ class YouTubeService:
             logger.debug("Credentials missing or invalid; refreshing or running OAuth flow")
             if credentials and credentials.expired and credentials.refresh_token:
                 logger.debug("Refreshing expired YouTube credentials")
-                credentials.refresh(Request())
-            else:
+                try:
+                    credentials.refresh(Request())
+                except RefreshError:
+                    logger.warning(
+                        "Token refresh failed (expired/revoked); removing %s and re-authenticating",
+                        self.token_path,
+                    )
+                    os.remove(self.token_path)
+                    credentials = None
+            if credentials is None or not credentials.valid:
                 if not os.path.exists(self.client_secrets_path):
                     logger.debug("Client secrets file missing at %s", self.client_secrets_path)
                     raise FileNotFoundError(
@@ -130,6 +139,168 @@ class YouTubeService:
             len(subscriptions),
         )
         return subscriptions
+
+    def fetch_subscriptions_innertube(self, max_pages: int = 50) -> List[Dict[str, Any]]:
+        """Fetch all subscriptions via YouTube's InnerTube API.
+
+        Uses the WEB client to browse FEchannels (the subscription management page).
+        This returns the complete subscription list, unlike the public Data API v3
+        which may omit channels.
+
+        Returns a list of dicts with channelId, channelTitle, thumbnailUrl.
+        """
+        logger.debug("Fetching subscriptions via InnerTube max_pages=%s", max_pages)
+
+        if self.credentials.expired and self.credentials.refresh_token:
+            self.credentials.refresh(Request())
+
+        innertube_url = "https://youtubei.googleapis.com/youtubei/v1/browse"
+        headers = {
+            "Authorization": f"Bearer {self.credentials.token}",
+            "Content-Type": "application/json",
+        }
+        client_context = {
+            "client": {
+                "clientName": "TVHTML5",
+                "clientVersion": "7.20250320",
+            }
+        }
+
+        subscriptions: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        continuation_token: Optional[str] = None
+
+        for page in range(max_pages):
+            if page == 0:
+                body: Dict[str, Any] = {
+                    "context": client_context,
+                    "browseId": "FEchannels",
+                }
+            else:
+                if not continuation_token:
+                    break
+                body = {
+                    "context": client_context,
+                    "continuation": continuation_token,
+                }
+
+            try:
+                resp = http_requests.post(
+                    innertube_url, headers=headers, json=body, timeout=30
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception:
+                logger.exception("InnerTube FEchannels request failed page=%s", page)
+                break
+
+            items, continuation_token = self._parse_channels_page(data, page == 0)
+
+            for item in items:
+                channel_id = item.get("channelId")
+                if channel_id and channel_id not in seen_ids:
+                    seen_ids.add(channel_id)
+                    subscriptions.append(item)
+
+            logger.debug(
+                "InnerTube FEchannels page=%s items=%s total=%s has_continuation=%s",
+                page, len(items), len(subscriptions), bool(continuation_token),
+            )
+
+            if not items and not continuation_token:
+                break
+
+        logger.debug("InnerTube FEchannels complete total_subscriptions=%s", len(subscriptions))
+        return subscriptions
+
+    @staticmethod
+    def _parse_channels_page(
+        data: Dict[str, Any], is_first_page: bool
+    ) -> tuple:
+        """Extract channel items and continuation token from InnerTube FEchannels response.
+
+        TVHTML5 client returns tileRenderer items inside:
+        - First page:  contents.tvBrowseRenderer...sectionListRenderer.contents[].shelfRenderer
+                        .content.horizontalListRenderer.items[]
+        - Continuation: continuationContents.sectionListContinuation.contents[].shelfRenderer
+                        .content.horizontalListRenderer.items[]
+        """
+        items: List[Dict[str, Any]] = []
+        continuation_token: Optional[str] = None
+
+        def _extract_tiles_from_shelf_list(shelf_list: list) -> None:
+            """Pull tileRenderer items from a list of shelfRenderers."""
+            for shelf_item in shelf_list:
+                hr_items = (
+                    shelf_item.get("shelfRenderer", {})
+                    .get("content", {})
+                    .get("horizontalListRenderer", {})
+                    .get("items", [])
+                )
+                for item in hr_items:
+                    tile = item.get("tileRenderer")
+                    if not tile:
+                        continue
+                    channel_id = tile.get("contentId")
+                    if not channel_id:
+                        continue
+                    title = (
+                        tile.get("metadata", {})
+                        .get("tileMetadataRenderer", {})
+                        .get("title", {})
+                        .get("simpleText", "")
+                    )
+                    thumbnail_url = ""
+                    thumbnails = (
+                        tile.get("header", {})
+                        .get("tileHeaderRenderer", {})
+                        .get("thumbnail", {})
+                        .get("thumbnails", [])
+                    )
+                    if thumbnails:
+                        thumbnail_url = thumbnails[-1].get("url", "")
+                        if thumbnail_url.startswith("//"):
+                            thumbnail_url = "https:" + thumbnail_url
+                    items.append({
+                        "channelId": channel_id,
+                        "channelTitle": title,
+                        "thumbnailUrl": thumbnail_url,
+                    })
+
+        if is_first_page:
+            # Navigate: tvBrowseRenderer → tvSecondaryNavRenderer → tabs → tvSurfaceContentRenderer → sectionListRenderer
+            section_list = (
+                data.get("contents", {})
+                .get("tvBrowseRenderer", {})
+                .get("content", {})
+                .get("tvSecondaryNavRenderer", {})
+                .get("sections", [{}])[0]
+                .get("tvSecondaryNavSectionRenderer", {})
+                .get("tabs", [{}])[0]
+                .get("tabRenderer", {})
+                .get("content", {})
+                .get("tvSurfaceContentRenderer", {})
+                .get("content", {})
+                .get("sectionListRenderer", {})
+            )
+            _extract_tiles_from_shelf_list(section_list.get("contents", []))
+            for cont in section_list.get("continuations", []):
+                token = cont.get("nextContinuationData", {}).get("continuation")
+                if token:
+                    continuation_token = token
+        else:
+            # continuationContents.sectionListContinuation
+            section = (
+                data.get("continuationContents", {})
+                .get("sectionListContinuation", {})
+            )
+            _extract_tiles_from_shelf_list(section.get("contents", []))
+            for cont in section.get("continuations", []):
+                token = cont.get("nextContinuationData", {}).get("continuation")
+                if token:
+                    continuation_token = token
+
+        return items, continuation_token
 
     def fetch_recent_uploads_for_channel(
         self, channel_id: str, limit: int = 50, published_after: Optional[datetime] = None
@@ -297,6 +468,39 @@ class YouTubeService:
                 logger.exception("Error fetching video details for batch offset=%s", i)
 
         logger.debug("Fetched video details for %s/%s videos", len(details), len(video_ids))
+        return details
+
+    def fetch_channel_details(self, channel_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch channel snippet info for a list of channel IDs (batched by 50).
+
+        Returns a dict mapping channel_id -> {"title", "description", "thumbnail_url"}.
+        """
+        if not channel_ids:
+            return {}
+
+        details: Dict[str, Dict[str, Any]] = {}
+
+        for i in range(0, len(channel_ids), 50):
+            batch = channel_ids[i : i + 50]
+            logger.debug("Fetching channel details batch offset=%s size=%s", i, len(batch))
+            try:
+                response = (
+                    self.youtube.channels()
+                    .list(part="snippet", id=",".join(batch))
+                    .execute()
+                )
+                for item in response.get("items", []):
+                    ch_id = item.get("id")
+                    snippet = item.get("snippet", {})
+                    details[ch_id] = {
+                        "title": snippet.get("title", ""),
+                        "description": snippet.get("description", ""),
+                        "thumbnail_url": snippet.get("thumbnails", {}).get("default", {}).get("url"),
+                    }
+            except HttpError:
+                logger.exception("Error fetching channel details for batch offset=%s", i)
+
+        logger.debug("Fetched channel details for %s/%s channels", len(details), len(channel_ids))
         return details
 
     def fetch_owned_playlists(self) -> List[Dict[str, Any]]:

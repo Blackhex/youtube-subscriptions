@@ -17,6 +17,11 @@ templates/index.html — Single HTML template
 instance/           — SQLite database (auto-created)
 ```
 
+## General Instructions
+
+- Use `Run App` tasks to start the Flask server and frontend dev server.
+- Use VSCode internal browser to view and test the app at `http://localhost:5000`.
+
 ## Python Conventions
 
 - **Type hints** on all function signatures: `def func(id: int) -> Dict[str, Any]:`
@@ -37,7 +42,7 @@ instance/           — SQLite database (auto-created)
 ### SQLAlchemy Models
 
 - Explicit `__tablename__`, `id` as Integer primary key
-- Timestamps: `created_at`, `updated_at` with `datetime.utcnow`
+- Timestamps: `created_at`, `updated_at` with `datetime.now()`
 - `to_dict()` method with optional include flags (`include_children`, `include_categories`)
 - Cascade deletes: `cascade="all, delete-orphan"` for parent-child relationships
 - Schema changes: raw SQL via `db.session.execute(text(...))` in migration helpers

@@ -32,6 +32,13 @@
                 <button id="getSuggestionsBtn" class="btn btn-icon d-none" title="Get AI category suggestions">
                     <span class="material-icons">auto_awesome</span>
                 </button>
+                <button id="exportCategoriesBtn" class="btn btn-icon d-none" title="Export categories to JSON">
+                    <span class="material-icons">file_upload</span>
+                </button>
+                <button id="importCategoriesBtn" class="btn btn-icon d-none" title="Import categories from JSON">
+                    <span class="material-icons">file_download</span>
+                </button>
+                <input type="file" id="importCategoriesFile" accept=".json" class="d-none">
                 <button id="syncBtn" class="btn btn-icon" title="Sync subscriptions and videos from YouTube">
                     <span class="material-icons" id="syncBtnIcon">sync</span>
                 </button>
@@ -41,7 +48,7 @@
         <!-- Section: Subscriptions -->
         <div id="sectionSubscriptions" class="row g-2 p-2 d-none flex-fill">
             <!-- Sidebar: Categories -->
-            <aside class="col-12 col-md-3 col-lg-2 flex-col">
+            <aside id="categoriesSidebar" class="flex-col">
                 <div class="card">
                     <div class="card-header">
                         <h6 class="mb-0 fw-semibold">Categories</h6>
@@ -50,10 +57,12 @@
                         <div class="special-filter-item py-1 px-3" id="filterAll" onclick="selectSpecialFilter('all')">
                             <span class="material-icons filter-icon me-1">folder</span>
                             <span class="filter-label">All</span>
+                            <span class="category-count ms-auto" id="countAll"></span>
                         </div>
                         <div class="special-filter-item py-1 px-3" id="filterUncategorized" onclick="selectSpecialFilter('uncategorized')">
                             <span class="material-icons filter-icon me-1">description</span>
                             <span class="filter-label">Uncategorized</span>
+                            <span class="category-count ms-auto" id="countUncategorized"></span>
                         </div>
                     </div>
                     <div id="categoriesTree" class="categories-tree flex-fill scrollable p-2">
@@ -62,8 +71,11 @@
                 </div>
             </aside>
 
+            <!-- Resize handle -->
+            <div id="sidebarResizer" class="sidebar-resizer"></div>
+
             <!-- Main content: Subscriptions -->
-            <main class="col-12 col-md-9 col-lg-10 flex-col">
+            <main class="flex-col" style="flex:1;min-width:0">
                 <div class="card">
                     <div class="card-header">
                         <h6 class="mb-0 fw-semibold" id="contentTitle">All</h6>

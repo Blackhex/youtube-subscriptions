@@ -367,6 +367,21 @@ body {
     background: #eee;
 }
 
+.subscription-thumbnail {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+}
+
+.subscription-thumb-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 48px;
+    color: #bbb;
+    background: transparent;
+}
+
 .list-item-thumb-sm {
     width: 48px;
     height: 48px;
@@ -456,6 +471,8 @@ body {
     cursor: pointer;
     user-select: none;
     font-size: 0.8rem;
+    display: flex;
+    align-items: center;
 }
 
 .special-filter-item:hover {
@@ -568,6 +585,12 @@ aside .card, main .card {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.category-count {
+    font-size: 0.7rem;
+    opacity: 0.6;
+    flex-shrink: 0;
 }
 
 .category-children {
@@ -729,6 +752,33 @@ aside .card, main .card {
 #sectionSubscriptions {
     flex-wrap: nowrap;
     overflow: hidden;
+}
+
+#sectionSubscriptions > * {
+    width: auto;
+    max-width: none;
+}
+
+#categoriesSidebar {
+    width: 200px;
+    min-width: 120px;
+    max-width: 50%;
+    flex-shrink: 0;
+}
+
+.sidebar-resizer {
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 10;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.active {
+    background: var(--md-primary);
+    opacity: 0.4;
 }
 
 /* Search Input */
