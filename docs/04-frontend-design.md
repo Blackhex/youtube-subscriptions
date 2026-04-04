@@ -87,7 +87,7 @@ Two button styles (CSS classes in `app.css`):
 - Cast button triggers `useCast()` hook → YouTube Lounge + polling
 
 **`<VideoItem>` (shared component):**
-- Stacked layout: thumbnail (120×68px) on left with duration badge overlay and progress bar
+- Stacked layout: thumbnail (168×94px) on left with duration badge overlay and progress bar
 - Action buttons below thumbnail: drag handle, queue add, playlist add, remove
 - Right side: title (truncated), channel name, relative time (`timeAgo()` utility)
 - Watched videos (≥95%) have 50% opacity
@@ -257,7 +257,7 @@ React (Cast SDK)            Django Backend (Lounge API)    YouTube Receiver
 - **`flex-fill`**: `flex: 1; min-height: 0`
 - **`scrollable`**: `overflow-y: auto` with thin custom scrollbar (4px)
 - **`scrollable-x`**: Horizontal scroll for column layouts
-- **Column sizing**: `flex: 0 0 clamp(300px, 30vw, 450px)`
+- **Column sizing**: `flex: 0 0 clamp(300px, 30vw, 500px)` with `min-width: 0` (overrides flexbox `auto` to enforce uniform width)
 
 Bootstrap is imported via npm (`import 'bootstrap/dist/css/bootstrap.min.css'` in `main.tsx`). Custom overrides live in `app.css`.
 
