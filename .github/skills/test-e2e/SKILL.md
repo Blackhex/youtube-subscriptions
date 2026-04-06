@@ -34,7 +34,7 @@ export default defineConfig({
   timeout: 30_000,
   retries: 1,
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: 'http://localhost:8001',
     screenshot: 'only-on-failure',
     trace: 'on-first-retry',
   },
@@ -46,7 +46,7 @@ export default defineConfig({
     },
     {
       command: 'npm run dev',
-      port: 5173,
+      port: 8001,
       reuseExistingServer: true,
     },
   ],
@@ -136,7 +136,7 @@ export { expect };
 The Playwright MCP (`mcp_microsoft_pla/*`) provides browser control tools for exploratory testing and debugging before writing automated specs. Use them to:
 
 ### Explore & Debug
-1. `browser_navigate` → Open `http://localhost:5173` to load the app
+1. `browser_navigate` → Open `http://localhost:8001` to load the app
 2. `browser_snapshot` → Get accessibility tree to find correct selectors and verify structure
 3. `browser_take_screenshot` → Capture visual state for comparison against design
 4. `browser_console_messages` → Check for JavaScript errors after interactions

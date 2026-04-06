@@ -83,7 +83,7 @@ Use the Playwright MCP (`mcp_microsoft_pla/*`) for interactive debugging, explor
 - DO NOT make real YouTube, Gemini, or Cast API calls — mock them via route interception
 - DO NOT write unit tests — that's the frontend/backend tester's job
 - Clean the database between test suites via fixture teardown
-- Tests must work with both servers running (Django :8000, Vite :5173)
+- Tests must work with both servers running (Django :8000, Vite :8001)
 - Skip tests that require physical Cast hardware — mock Lounge API responses
 
 ## Knowledge Capture

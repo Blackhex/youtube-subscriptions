@@ -28,7 +28,7 @@ python manage.py migrate
 python manage.py runserver  # :8000
 
 # Frontend
-cd frontend && npm install && npm run dev  # :5173 with proxy to :8000
+cd frontend && npm install && npm run dev  # :8001 with proxy to :8000
 
 # Tests
 python manage.py test subscriptions

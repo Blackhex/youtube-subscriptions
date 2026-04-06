@@ -34,7 +34,7 @@
 1. User runs `python manage.py migrate` then `python manage.py runserver`
 2. Django creates SQLite database (`db.sqlite3`) and applies migrations
 3. In a separate terminal, user runs `cd frontend && npm install && npm run dev`
-4. User opens `http://localhost:5173` (Vite dev server) → React app loads, Feeds section shown (empty)
+4. User opens `http://localhost:8001` (Vite dev server) → React app loads, Feeds section shown (empty)
 5. User clicks Sync button (top-right)
 6. React calls `POST /api/sync/all/` → Django backend detects no `token.json` → starts OAuth flow
 7. Browser opens Google consent screen → user authorizes YouTube access

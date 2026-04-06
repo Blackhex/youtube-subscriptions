@@ -48,7 +48,7 @@ Load this skill before starting work:
 1. Read the Frontend Design doc §2 (Design System) and §3 (Section Details)
 2. Read the User Scenarios doc for expected interaction flows
 3. Use Playwright MCP tools to open the app and verify visually:
-   - `browser_navigate` to open `http://localhost:5173`
+   - `browser_navigate` to open `http://localhost:8001`
    - `browser_snapshot` to inspect accessibility tree (WCAG review)
    - `browser_take_screenshot` for visual compliance evidence
    - `browser_click` / `browser_drag` to test interaction patterns

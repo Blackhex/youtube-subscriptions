@@ -78,7 +78,7 @@ export default defineConfig({
 4. Download `client_secret.json` to project root
 5. (Optional) Create Gemini API key, save to `gemini_api_key.txt`
 
-**Milestone:** Django serves API at `:8000`, Vite dev server at `:5173` with proxy.
+**Milestone:** Django serves API at `:8000`, Vite dev server at `:8001` with proxy.
 
 ---
 

@@ -51,7 +51,7 @@ Load this skill before starting work:
 2. Implement CSS sections in the documented order (variables → base → overrides → components → utilities)
 3. Use CSS custom properties for all colors — never hardcode hex values in component styles
 4. Use Playwright MCP to preview changes in the browser:
-   - `browser_navigate` to open `http://localhost:5173`
+   - `browser_navigate` to open `http://localhost:8001`
    - `browser_take_screenshot` to verify visual output matches design spec
    - `browser_snapshot` to check element structure and accessibility
 5. Test that Bootstrap is overridden correctly (primary button color, card shadows)
