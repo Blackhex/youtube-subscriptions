@@ -1,46 +1,127 @@
 {
   "tasks": [
     {
-      "command": "python app.py",
-      "group": {
-        "isDefault": true,
-        "kind": "build"
-      },
+      "command": "python manage.py runserver 0.0.0.0:8000",
+      "dependsOn": [
+        "Install/Python Dependencies"
+      ],
       "isBackground": true,
-      "label": "Run App",
-      "problemMatcher": [],
+      "label": "Run/Django Server",
+      "problemMatcher": [
+        {
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": ".*",
+            "endsPattern": "Starting development server at .*"
+          },
+          "owner": "custom",
+          "pattern": {
+            "message": 1,
+            "regexp": "^(.*)$"
+          }
+        }
+      ],
       "runOptions": {
         "runOn": "folderOpen"
       },
       "type": "shell"
     },
     {
-      "command": "pip install -r requirements.txt",
-      "label": "Install Dependencies",
+      "command": "cd frontend && npm run dev",
+      "dependsOn": [
+        "Install/Frontend Dependencies",
+        "Run/Django Server"
+      ],
+      "isBackground": true,
+      "label": "Run/Vite Dev Server",
+      "problemMatcher": [
+        {
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": ".*",
+            "endsPattern": ".*(ready in|Local:).*"
+          },
+          "owner": "custom",
+          "pattern": {
+            "message": 1,
+            "regexp": "^(.*)$"
+          }
+        }
+      ],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "type": "shell"
+    },
+    {
+      "dependsOn": [
+        "Install/Python Dependencies",
+        "Install/Frontend Dependencies"
+      ],
+      "label": "Install/All Dependencies",
+      "problemMatcher": []
+    },
+    {
+      "command": "python -m pip install -r requirements.txt",
+      "label": "Install/Python Dependencies",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "silent"
+      },
       "problemMatcher": [],
       "type": "shell"
     },
     {
-      "command": "python migrate_db.py",
-      "label": "Migrate Database",
+      "command": "cd frontend && npm install",
+      "label": "Install/Frontend Dependencies",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "silent"
+      },
       "problemMatcher": [],
       "type": "shell"
     },
     {
-      "command": "Remove-Item -Path instance/subscriptions.db -ErrorAction SilentlyContinue; Write-Host 'Database deleted. Restart the app to recreate.'",
-      "label": "Reset Database",
+      "command": "python manage.py makemigrations subscriptions && python manage.py migrate",
+      "dependsOn": [
+        "Install/Python Dependencies"
+      ],
+      "label": "Database/Migrate",
       "problemMatcher": [],
       "type": "shell"
     },
     {
-      "command": "Remove-Item -Path token.json -ErrorAction SilentlyContinue; Write-Host 'Token deleted. Restart the app to re-authenticate.'",
-      "label": "Delete OAuth Token",
+      "command": "rm -f db.sqlite3 && echo 'Database deleted. Restart the server to recreate.'",
+      "label": "Database/Reset",
       "problemMatcher": [],
       "type": "shell"
     },
     {
-      "command": "${input:openSimpleBrowser}",
-      "label": "Open in Browser",
+      "command": "rm -f token.json && echo 'Token deleted. Restart the server to re-authenticate.'",
+      "label": "Auth/Delete OAuth Token",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "cd frontend && npm run build",
+      "dependsOn": [
+        "Install/Frontend Dependencies"
+      ],
+      "label": "Build/Frontend",
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      // Resolving the input is what actually opens the Simple Browser; echo is just a no-op carrier.
+      "command": "echo Opened http://127.0.0.1:8001 ${input:openSimpleBrowser}",
+      "dependsOn": [
+        "Run/Vite Dev Server"
+      ],
+      "label": "Run/Open in Browser",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "silent"
+      },
       "problemMatcher": [],
       "type": "shell"
     }
@@ -50,7 +131,7 @@
       "id": "openSimpleBrowser",
       "type": "command",
       "command": "simpleBrowser.api.open",
-      "args": "http://127.0.0.1:5000"
+      "args": "http://127.0.0.1:8000"
     }
   ],
   "version": "2.0.0"

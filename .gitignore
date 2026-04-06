@@ -1,0 +1,16 @@
+# Data
+db.sqlite3
+
+# VSCode
+.vscode/task-history.ndjson
+.playwright-mcp/
+
+# Lock files
+.devcontainer/devcontainer-lock.json
+package-lock.json
+
+# Secrets
+client_secret.json
+gemini_api_key.txt
+token.json
+media/browser_state.json

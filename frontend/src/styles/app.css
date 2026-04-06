@@ -1,0 +1,913 @@
+/* ==========================================================================
+   YouTube Subscriptions Organizer — Design System
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. CSS Variables
+   -------------------------------------------------------------------------- */
+:root {
+  --md-primary: #667eea;
+  --md-primary-dark: #5568d3;
+  --md-success: #48bb78;
+  --md-danger: #f56565;
+  --md-bg: #f5f5f5;
+  --md-card-bg: #ffffff;
+  --md-text-primary: #333;
+  --md-text-secondary: #666;
+  --md-text-meta: #999;
+  --md-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --md-border-radius: 8px;
+}
+
+/* --------------------------------------------------------------------------
+   2. Base / Layout
+   -------------------------------------------------------------------------- */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.875rem;
+  background: var(--md-bg);
+  color: var(--md-text-primary);
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.flex-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.flex-fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.scrollable {
+  overflow-y: auto;
+}
+
+.scrollable-x {
+  overflow-x: auto;
+  display: flex;
+  gap: 0;
+}
+
+/* --------------------------------------------------------------------------
+   3. Custom Scrollbar (thin, 4px)
+   -------------------------------------------------------------------------- */
+.scrollable::-webkit-scrollbar,
+.scrollable-x::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.scrollable::-webkit-scrollbar-track,
+.scrollable-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollable::-webkit-scrollbar-thumb,
+.scrollable-x::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+.scrollable::-webkit-scrollbar-thumb:hover,
+.scrollable-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* --------------------------------------------------------------------------
+   4. Navbar
+   -------------------------------------------------------------------------- */
+.navbar {
+  background: var(--md-primary) !important;
+  padding: 0.4rem 1rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 100;
+}
+
+.nav-pills .nav-link {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.35rem 0.75rem;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: none;
+  background: none;
+}
+
+.nav-pills .nav-link:hover {
+  color: white;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.nav-pills .nav-link.active {
+  color: white;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.navbar-actions {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+/* --------------------------------------------------------------------------
+   5. Action Buttons
+   -------------------------------------------------------------------------- */
+
+/* btn-icon — navbar circular buttons */
+.btn-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+  padding: 0;
+}
+
+.btn-icon:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.btn-icon svg {
+  font-size: 1.1rem;
+}
+
+/* btn-action — inline action buttons */
+.btn-action {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--md-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.btn-action:hover {
+  background: rgba(102, 126, 234, 0.1);
+}
+
+.btn-action svg {
+  font-size: 1rem;
+}
+
+.btn-action-sm {
+  width: 20px;
+  height: 20px;
+}
+
+.btn-action-sm svg {
+  font-size: 0.85rem;
+}
+
+.btn-action-danger {
+  color: var(--md-danger);
+}
+
+.btn-action-danger:hover {
+  background: rgba(245, 101, 101, 0.1);
+}
+
+.btn-action-reveal {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* Parent hover reveals hidden buttons */
+*:hover > .btn-action-reveal,
+*:hover > * > .btn-action-reveal {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   6. Card / Column Layout
+   -------------------------------------------------------------------------- */
+.column {
+  flex: 0 0 clamp(300px, 30vw, 450px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--md-card-bg);
+  border-right: 1px solid #eee;
+}
+
+.column:last-child {
+  border-right: none;
+}
+
+.column-header {
+  padding: 0.75rem;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.column-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+/* Custom scrollbar for column body */
+.column-body::-webkit-scrollbar {
+  width: 4px;
+}
+.column-body::-webkit-scrollbar-track { background: transparent; }
+.column-body::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 4px; }
+
+/* --------------------------------------------------------------------------
+   7. Video Item
+   -------------------------------------------------------------------------- */
+.video-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: var(--md-border-radius);
+  transition: background 0.15s;
+  cursor: default;
+}
+
+.video-item:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.video-item.watched {
+  opacity: 0.5;
+}
+
+.video-thumbnail {
+  position: relative;
+  width: 120px;
+  height: 68px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #e0e0e0;
+}
+
+.video-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.duration-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.progress-bar-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: #f00;
+  transition: width 0.3s;
+}
+
+.video-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.video-info .video-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.3;
+}
+
+.video-info .video-meta {
+  font-size: 0.8rem;
+  color: var(--md-text-secondary);
+  margin-top: 2px;
+}
+
+.video-info .video-channel {
+  font-size: 0.8rem;
+  color: var(--md-text-secondary);
+}
+
+.video-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   8. Queue Item
+   -------------------------------------------------------------------------- */
+.queue-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.4rem;
+  border-bottom: 1px solid #f0f0f0;
+  align-items: flex-start;
+}
+
+.queue-item:last-child {
+  border-bottom: none;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: var(--md-text-meta);
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* --------------------------------------------------------------------------
+   9. Category Tree (sidebar)
+   -------------------------------------------------------------------------- */
+.category-sidebar {
+  width: 200px;
+  min-width: 120px;
+  border-right: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  background: var(--md-card-bg);
+}
+
+.category-sidebar-header {
+  padding: 0.5rem 0.75rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-bottom: 1px solid #eee;
+  flex-shrink: 0;
+}
+
+.category-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.25rem 0;
+}
+
+.category-tree::-webkit-scrollbar { width: 4px; }
+.category-tree::-webkit-scrollbar-track { background: transparent; }
+.category-tree::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 4px; }
+
+.category-node {
+  display: flex;
+  align-items: center;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.1s;
+  gap: 2px;
+  user-select: none;
+}
+
+.category-node:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.category-node.active {
+  background: var(--md-primary);
+  color: white;
+}
+
+.category-node.active .btn-action,
+.category-node.active .btn-action-sm {
+  color: white;
+}
+
+.category-node .category-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.category-node .category-count {
+  color: var(--md-text-meta);
+  font-size: 0.7rem;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.category-node.active .category-count {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.category-children {
+  padding-left: 1rem;
+}
+
+.category-children.collapsed {
+  display: none;
+}
+
+/* Special filter items (All, Uncategorized) */
+.special-filter {
+  display: flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.1s;
+  gap: 0.5rem;
+}
+
+.special-filter:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.special-filter.active {
+  background: var(--md-primary);
+  color: white;
+}
+
+.special-filter .special-count {
+  margin-left: auto;
+  color: var(--md-text-meta);
+  font-size: 0.75rem;
+}
+
+.special-filter.active .special-count {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Suggested category highlight */
+.suggested-category {
+  border-left: 3px solid var(--md-primary);
+  background: rgba(102, 126, 234, 0.05);
+}
+
+.suggested-badge {
+  font-size: 0.6rem;
+  background: var(--md-primary);
+  color: white;
+  padding: 1px 4px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+
+/* Selection mode helper banner */
+.selection-banner {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--md-primary);
+  background: rgba(102, 126, 234, 0.08);
+  border-bottom: 1px solid rgba(102, 126, 234, 0.15);
+}
+
+/* --------------------------------------------------------------------------
+   10. Subscription List
+   -------------------------------------------------------------------------- */
+.subscription-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.subscription-list-header {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #eee;
+  flex-shrink: 0;
+}
+
+.subscription-list-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.subscription-search {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #ddd;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  outline: none;
+  width: 200px;
+  transition: border-color 0.15s;
+}
+
+.subscription-search:focus {
+  border-color: var(--md-primary);
+}
+
+.subscription-item {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  align-items: center;
+  transition: background 0.1s;
+  cursor: pointer;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.subscription-item:hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.subscription-item.selected {
+  background: rgba(102, 126, 234, 0.08);
+  border-left: 3px solid var(--md-primary);
+}
+
+.subscription-item input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.subscription-thumbnail {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: #e0e0e0;
+}
+
+.subscription-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.subscription-info .subscription-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subscription-info .subscription-desc {
+  font-size: 0.8rem;
+  color: var(--md-text-secondary);
+  margin: 2px 0 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.category-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--md-primary);
+  color: white;
+  margin-right: 4px;
+  margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   11. Filter Tags
+   -------------------------------------------------------------------------- */
+.filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid #eee;
+}
+
+.filter-tag {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: rgba(102, 126, 234, 0.1);
+  color: var(--md-primary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filter-tag svg {
+  font-size: 0.75rem;
+}
+
+.filter-tag-and {
+  background: transparent;
+  color: var(--md-text-meta);
+  font-weight: 600;
+  font-size: 0.6rem;
+  padding: 2px 4px;
+}
+
+/* --------------------------------------------------------------------------
+   12. Modals
+   -------------------------------------------------------------------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  border-radius: var(--md-border-radius);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  padding: 1rem;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 1rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid #eee;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.modal-footer .btn-delete {
+  margin-right: auto;
+}
+
+/* Form elements in modals */
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+  color: var(--md-text-secondary);
+}
+
+.form-group input:not([type="checkbox"]):not([type="radio"]),
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: var(--md-primary);
+}
+
+/* Category group selector in feed modal */
+.category-group {
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.category-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--md-text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.category-group .category-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--md-text-primary);
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   13. Bootstrap Button Overrides
+   -------------------------------------------------------------------------- */
+.btn-primary {
+  background: var(--md-primary) !important;
+  border-color: var(--md-primary) !important;
+  font-size: 0.85rem;
+  padding: 0.35rem 1rem;
+}
+
+.btn-primary:hover {
+  background: var(--md-primary-dark) !important;
+  border-color: var(--md-primary-dark) !important;
+}
+
+.btn-secondary {
+  font-size: 0.85rem;
+  padding: 0.35rem 1rem;
+}
+
+.btn-danger {
+  background: var(--md-danger) !important;
+  border-color: var(--md-danger) !important;
+  font-size: 0.85rem;
+  padding: 0.35rem 1rem;
+}
+
+.btn-sm {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+}
+
+/* --------------------------------------------------------------------------
+   14. Toast
+   -------------------------------------------------------------------------- */
+.toast-container {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  z-index: 2000;
+}
+
+.toast {
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  color: white;
+  font-size: 0.85rem;
+  box-shadow: var(--md-shadow);
+  animation: slideIn 0.2s ease-out;
+}
+
+.toast-success {
+  background: var(--md-success);
+}
+
+.toast-error {
+  background: var(--md-danger);
+}
+
+.toast-info {
+  background: var(--md-primary);
+}
+
+@keyframes slideIn {
+  from { transform: translateX(50px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* --------------------------------------------------------------------------
+   15. Spinner Overlay
+   -------------------------------------------------------------------------- */
+.spinner-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+
+/* --------------------------------------------------------------------------
+   16. Sync Spinning Icon
+   -------------------------------------------------------------------------- */
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* --------------------------------------------------------------------------
+   17. Sidebar Resizer
+   -------------------------------------------------------------------------- */
+.sidebar-resizer {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.active {
+  background: var(--md-primary);
+}
+
+/* --------------------------------------------------------------------------
+   18. Drag and Drop States
+   -------------------------------------------------------------------------- */
+.dragging {
+  opacity: 0.5;
+}
+
+.drop-target {
+  border: 2px dashed var(--md-primary);
+  border-radius: var(--md-border-radius);
+}
+
+/* --------------------------------------------------------------------------
+   19. Empty State
+   -------------------------------------------------------------------------- */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: var(--md-text-meta);
+  text-align: center;
+  height: 100%;
+}
+
+.empty-state p {
+  margin: 0.5rem 0;
+}
+
+/* --------------------------------------------------------------------------
+   20. Confirm Dialog
+   -------------------------------------------------------------------------- */
+.confirm-dialog .modal-content {
+  max-width: 400px;
+}
