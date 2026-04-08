@@ -41,7 +41,22 @@ const VideoItem = React.memo(function VideoItem({ video, actions, dragListeners 
     <div className={`video-item${isWatched ? ' watched' : ''}`}>
       <div className="video-thumbnail">
         {video.thumbnail_url ? (
-          <img src={video.thumbnail_url} alt={video.title} loading="lazy" />
+          <img
+            src={video.thumbnail_url}
+            alt={video.title}
+            loading="lazy"
+            onError={(e) => {
+              const img = e.currentTarget;
+              if (video.channel_id) {
+                const channelFallback = `/api/subscriptions/${video.channel_id}/thumbnail/`;
+                if (!img.src.endsWith(channelFallback)) {
+                  img.src = channelFallback;
+                  return;
+                }
+              }
+              img.style.display = 'none';
+            }}
+          />
         ) : (
           <div style={{ width: '100%', height: '100%', background: '#e0e0e0' }} />
         )}
@@ -53,7 +68,15 @@ const VideoItem = React.memo(function VideoItem({ video, actions, dragListeners 
         )}
       </div>
       <div className="video-info">
-        <p className="video-title">{video.title}</p>
+        <a
+          className="video-title"
+          href={`https://www.youtube.com/watch?v=${video.video_id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {video.title}
+        </a>
         {video.channel_title && (
           <div className="video-channel">{video.channel_title}</div>
         )}

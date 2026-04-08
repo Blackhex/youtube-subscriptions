@@ -1,12 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios from 'axios';
-import {
-  fetchCategories,
-  createFeed,
-  fetchSubscriptions,
-  importCategories,
-  exportCategories,
-} from '../client';
 
 vi.mock('axios', () => {
   const mockAxiosInstance = {

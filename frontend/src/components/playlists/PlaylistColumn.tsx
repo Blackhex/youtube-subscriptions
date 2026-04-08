@@ -27,7 +27,7 @@ interface PlaylistColumnProps {
   loading: boolean;
   onLoadMore: () => void;
   onRemoveItem: (playlistId: string, itemId: string) => void;
-  onReorder: (playlistId: string, itemIds: string[], videoIds: string[]) => void;
+  onReorder: (playlistId: string, itemIds: string[], videoIds: string[], reorderedItems: Video[]) => void;
   onDelete: (playlistId: string) => void;
   onCast: (playlistId: string) => void;
   castAvailable: boolean;
@@ -107,6 +107,7 @@ export default function PlaylistColumn({
       playlist.id,
       reordered.map((v) => v.playlist_item_id ?? ''),
       reordered.map((v) => v.video_id),
+      reordered,
     );
   }, [items, onReorder, playlist.id]);
 
@@ -128,10 +129,6 @@ export default function PlaylistColumn({
     <div className="column">
       <div className="column-header">
         <h3 title={playlist.title}>{playlist.title}</h3>
-        <div className="column-meta">
-          <span>{playlist.item_count} items</span>
-          <span>{playlist.privacy_status}</span>
-        </div>
         <div className="d-flex gap-1">
           {castAvailable && (
             <button
@@ -151,6 +148,10 @@ export default function PlaylistColumn({
             <Delete style={{ fontSize: '1rem' }} />
           </button>
         </div>
+      </div>
+      <div className="filter-tags">
+        <span className="filter-tag">{playlist.item_count} items</span>
+        <span className="filter-tag">{playlist.privacy_status}</span>
       </div>
       <div className="column-body">
         {items.length === 0 && !loading ? (

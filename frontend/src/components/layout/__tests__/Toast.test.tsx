@@ -4,7 +4,6 @@ import { renderWithProviders } from '../../../test/helpers';
 import Toast from '../Toast';
 import { AppProvider, useAppContext } from '../../../context/AppContext';
 import { render } from '@testing-library/react';
-import type { ReactNode } from 'react';
 
 // Helper component to dispatch toast actions
 function ToastTrigger({ message, type }: { message: string; type: 'success' | 'error' | 'info' }) {

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   YouTube Subscriptions Organizer — Design System
+   YouTube Subscriptions Organizer — Design System (v2)
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
@@ -213,12 +213,16 @@ html, body, #root {
    6. Card / Column Layout
    -------------------------------------------------------------------------- */
 .column {
-  flex: 0 0 clamp(300px, 30vw, 450px);
+  flex: 0 0 clamp(300px, 30vw, 500px);
+  width: clamp(300px, 30vw, 500px);
+  min-width: 0;
+  max-width: clamp(300px, 30vw, 500px);
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--md-card-bg);
   border-right: 1px solid #eee;
+  overflow: hidden;
 }
 
 .column:last-child {
@@ -262,11 +266,13 @@ html, body, #root {
    -------------------------------------------------------------------------- */
 .video-item {
   display: flex;
-  gap: 0.5rem;
-  padding: 0.5rem;
+  gap: 0;
+  padding: 4px;
   border-radius: var(--md-border-radius);
   transition: background 0.15s;
   cursor: default;
+  align-items: flex-start;
+  overflow: hidden;
 }
 
 .video-item:hover {
@@ -279,15 +285,17 @@ html, body, #root {
 
 .video-thumbnail {
   position: relative;
-  width: 120px;
-  height: 68px;
-  border-radius: 6px;
+  width: 168px;
+  height: 94px;
+  min-height: 94px;
   overflow: hidden;
   flex-shrink: 0;
   background: #e0e0e0;
+  border-radius: var(--md-border-radius);
 }
 
 .video-thumbnail img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -317,17 +325,24 @@ html, body, #root {
 .video-info {
   flex: 1;
   min-width: 0;
+  padding: 0.5rem;
 }
 
 .video-info .video-title {
   font-size: 0.9rem;
   font-weight: 600;
   margin: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
   line-height: 1.3;
+  color: inherit;
+  text-decoration: none;
+  display: block;
+}
+
+.video-info .video-title:hover {
+  text-decoration: underline;
 }
 
 .video-info .video-meta {
@@ -360,6 +375,10 @@ html, body, #root {
 
 .queue-item:last-child {
   border-bottom: none;
+}
+
+.queue-item .video-thumbnail {
+  min-height: unset;
 }
 
 .drag-handle {

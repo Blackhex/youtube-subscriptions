@@ -4,6 +4,7 @@ import mimetypes
 import os
 import re
 import threading
+import time
 from datetime import datetime, timedelta
 
 import requests as http_requests
@@ -489,7 +490,7 @@ class VideoThumbnailView(APIView):
 
         # Fall back to standard YouTube thumbnail URL
         if not thumbnail_url:
-            thumbnail_url = f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg'
+            thumbnail_url = f'https://i.ytimg.com/vi/{video_id}/mqdefault.jpg'
 
         # Download and cache
         try:
@@ -829,10 +830,29 @@ class PlaylistListView(APIView):
         try:
             from .youtube_service import YouTubeService
             yt = YouTubeService()
-            playlists = yt.fetch_playlists()
+            raw_playlists = yt.fetch_playlists()
         except Exception as e:
             logger.exception("Failed to fetch playlists")
             return Response({'error': f'Failed to fetch playlists: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        playlists = []
+        for p in raw_playlists:
+            snippet = p.get('snippet', {})
+            thumbnails = snippet.get('thumbnails', {})
+            thumb_url = (
+                thumbnails.get('medium', {}).get('url')
+                or thumbnails.get('high', {}).get('url')
+                or thumbnails.get('default', {}).get('url')
+            )
+            playlists.append({
+                'id': p.get('id', ''),
+                'title': snippet.get('title', ''),
+                'description': snippet.get('description', ''),
+                'thumbnail_url': thumb_url,
+                'item_count': int(p.get('contentDetails', {}).get('itemCount', 0)),
+                'privacy_status': p.get('status', {}).get('privacyStatus', 'private'),
+            })
+
         return Response(playlists)
 
 
@@ -885,6 +905,7 @@ class PlaylistItemsView(APIView):
             items.append({
                 'id': item.get('id', ''),
                 'video_id': video_id,
+                'channel_id': local.channel_id if local else snippet.get('videoOwnerChannelId', ''),
                 'title': local.title if local else snippet.get('title', ''),
                 'channel_title': local.channel.channel_title if local and local.channel else snippet.get('videoOwnerChannelTitle', ''),
                 'thumbnail_url': f'/api/videos/{video_id}/thumbnail/' if video_id else '',
@@ -936,6 +957,8 @@ class PlaylistItemsReorderView(APIView):
             from .youtube_service import YouTubeService
             yt = YouTubeService()
             for position, (item_id, video_id) in enumerate(zip(item_ids, video_ids)):
+                if position > 0:
+                    time.sleep(0.5)
                 yt.reorder_playlist_item(playlist_id, item_id, video_id, position)
         except Exception as e:
             logger.exception("Failed to reorder playlist items in %s", playlist_id)

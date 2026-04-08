@@ -61,7 +61,8 @@ class YouTubeService:
             try:
                 return request.execute()
             except HttpError as e:
-                if e.resp.status in (500, 503) and attempt < max_retries - 1:
+                # YouTube returns 409 for concurrent playlist mutation conflicts (not a true 409 Conflict)
+                if e.resp.status in (409, 500, 503) and attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
                 raise
@@ -89,7 +90,8 @@ class YouTubeService:
                     'channel_id': snippet['resourceId']['channelId'],
                     'channel_title': snippet['title'],
                     'channel_description': snippet.get('description', ''),
-                    'thumbnail_url': snippet.get('thumbnails', {}).get('default', {}).get('url'),
+                    'thumbnail_url': (snippet.get('thumbnails', {}).get('medium', {}).get('url')
+                                      or snippet.get('thumbnails', {}).get('default', {}).get('url')),
                     'subscription_date': snippet.get('publishedAt'),
                 })
 
@@ -121,7 +123,8 @@ class YouTubeService:
                     'uploads_playlist_id': content.get('relatedPlaylists', {}).get('uploads'),
                     'title': snippet.get('title'),
                     'description': snippet.get('description'),
-                    'thumbnail_url': snippet.get('thumbnails', {}).get('default', {}).get('url'),
+                    'thumbnail_url': (snippet.get('thumbnails', {}).get('medium', {}).get('url')
+                                      or snippet.get('thumbnails', {}).get('default', {}).get('url')),
                     'subscriber_count': stats.get('subscriberCount'),
                 }
 
@@ -161,7 +164,8 @@ class YouTubeService:
                     'title': snippet.get('title', ''),
                     'channel_id': snippet.get('channelId', ''),
                     'published_at': published_at,
-                    'thumbnail_url': snippet.get('thumbnails', {}).get('default', {}).get('url'),
+                    'thumbnail_url': (snippet.get('thumbnails', {}).get('medium', {}).get('url')
+                                      or snippet.get('thumbnails', {}).get('default', {}).get('url')),
                 })
 
             page_token = response.get('nextPageToken')
@@ -204,7 +208,8 @@ class YouTubeService:
                     'video_type': video_type,
                     'title': snippet.get('title'),
                     'description': snippet.get('description'),
-                    'thumbnail_url': snippet.get('thumbnails', {}).get('default', {}).get('url'),
+                    'thumbnail_url': (snippet.get('thumbnails', {}).get('medium', {}).get('url')
+                                      or snippet.get('thumbnails', {}).get('default', {}).get('url')),
                     'published_at': snippet.get('publishedAt'),
                 }
 

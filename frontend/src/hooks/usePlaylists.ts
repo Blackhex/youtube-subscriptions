@@ -99,13 +99,24 @@ export function usePlaylists() {
     }
   }, [dispatch]);
 
-  const reorderItems = useCallback(async (playlistId: string, itemIds: string[], videoIds: string[]) => {
+  const reorderItems = useCallback(async (playlistId: string, itemIds: string[], videoIds: string[], reorderedItems: Video[]) => {
+    const previous = playlistItems[playlistId];
+    // Optimistically update local state
+    setPlaylistItems((prev) => {
+      const state = prev[playlistId];
+      if (!state) return prev;
+      return { ...prev, [playlistId]: { ...state, items: reorderedItems } };
+    });
     try {
       await api.reorderPlaylistItems(playlistId, itemIds, videoIds);
     } catch {
+      // Revert on error
+      if (previous) {
+        setPlaylistItems((prev) => ({ ...prev, [playlistId]: previous }));
+      }
       dispatch({ type: 'SHOW_TOAST', message: 'Failed to reorder items', toastType: 'error' });
     }
-  }, [dispatch]);
+  }, [dispatch, playlistItems]);
 
   const deletePlaylist = useCallback(async (playlistId: string) => {
     try {
