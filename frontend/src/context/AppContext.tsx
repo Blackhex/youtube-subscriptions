@@ -1,8 +1,8 @@
-import { createContext, useContext, useReducer } from 'react';
-import type { ReactNode } from 'react';
+import { createContext, useContext } from 'react';
+import type { Dispatch } from 'react';
 import type { Category, QueueItem, SyncState } from '../types';
 
-interface AppState {
+export interface AppState {
   categories: Category[];
   totalCount: number;
   uncategorizedCount: number;
@@ -11,13 +11,14 @@ interface AppState {
   suggestedCategoryIds: number[];
   syncState: SyncState;
   queueItems: QueueItem[];
+  videoProgress: Record<string, number | null>;
   queuePlaybackActive: boolean;
   activeSection: 'feeds' | 'playlists' | 'subscriptions';
   loading: boolean;
   toast: { message: string; type: 'success' | 'error' | 'info' } | null;
 }
 
-type AppAction =
+export type AppAction =
   | { type: 'SET_CATEGORIES'; categories: Category[]; totalCount: number; uncategorizedCount: number }
   | { type: 'SELECT_CATEGORY'; id: number | null }
   | { type: 'TOGGLE_SELECTION'; id: number }
@@ -26,13 +27,14 @@ type AppAction =
   | { type: 'SET_SUGGESTED_CATEGORIES'; ids: number[] }
   | { type: 'SET_SYNC_STATE'; state: SyncState }
   | { type: 'SET_QUEUE_ITEMS'; items: QueueItem[] }
+  | { type: 'SET_VIDEO_PROGRESS'; progress: Record<string, number | null> }
   | { type: 'SET_QUEUE_PLAYBACK_ACTIVE'; active: boolean }
   | { type: 'SET_ACTIVE_SECTION'; section: 'feeds' | 'playlists' | 'subscriptions' }
   | { type: 'SET_LOADING'; loading: boolean }
   | { type: 'SHOW_TOAST'; message: string; toastType: 'success' | 'error' | 'info' }
   | { type: 'HIDE_TOAST' };
 
-const initialState: AppState = {
+export const initialState: AppState = {
   categories: [],
   totalCount: 0,
   uncategorizedCount: 0,
@@ -53,13 +55,14 @@ const initialState: AppState = {
     current_channel: null,
   },
   queueItems: [],
+  videoProgress: {},
   queuePlaybackActive: false,
   activeSection: 'feeds',
   loading: false,
   toast: null,
 };
 
-function appReducer(state: AppState, action: AppAction): AppState {
+export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_CATEGORIES':
       return {
@@ -90,6 +93,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, syncState: action.state };
     case 'SET_QUEUE_ITEMS':
       return { ...state, queueItems: action.items };
+    case 'SET_VIDEO_PROGRESS':
+      return {
+        ...state,
+        videoProgress: { ...state.videoProgress, ...action.progress },
+      };
     case 'SET_QUEUE_PLAYBACK_ACTIVE':
       return { ...state, queuePlaybackActive: action.active };
     case 'SET_ACTIVE_SECTION':
@@ -103,26 +111,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
   }
 }
 
-interface AppContextValue {
+export interface AppContextValue {
   state: AppState;
-  dispatch: React.Dispatch<AppAction>;
+  dispatch: Dispatch<AppAction>;
 }
 
-const AppContext = createContext<AppContextValue | null>(null);
-
-export function AppProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(appReducer, initialState);
-  return (
-    <AppContext.Provider value={{ state, dispatch }}>
-      {children}
-    </AppContext.Provider>
-  );
-}
+export const AppContext = createContext<AppContextValue | null>(null);
 
 export function useAppContext(): AppContextValue {
   const ctx = useContext(AppContext);
   if (!ctx) throw new Error('useAppContext must be used within AppProvider');
   return ctx;
 }
-
-export type { AppState, AppAction };

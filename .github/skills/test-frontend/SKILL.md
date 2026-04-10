@@ -188,3 +188,50 @@ npm test -- --watch         # Watch mode
 npm test -- --coverage      # Coverage report
 npm test -- CategoryTree    # Run specific test file
 ```
+
+## Drag-and-Drop (@dnd-kit) Testing
+
+Do not simulate a real pointer drag in jsdom — @dnd-kit sensors need layout metrics
+that jsdom does not provide. Split the coverage instead:
+
+- **Component tests**: any component calling `useSortable` throws without a
+  `DndContext` ancestor. Wrap the render:
+  ```tsx
+  render(
+    <DndContext>
+      <SortableContext items={[item.id]} strategy={horizontalListSortingStrategy}>
+        <FeedColumn ... />
+      </SortableContext>
+    </DndContext>,
+  );
+  ```
+  Assert the handle's accessible label and that non-drag controls (Edit button)
+  still fire their handlers — drag listeners on an inner element must not swallow them.
+- **Drag *effect* tests**: call the hook's reorder callback directly
+  (`result.current.reorderFeeds([3, 1, 2])`); real drag interaction belongs in Playwright E2E.
+- **Accessibility guard**: when a drag handle lives inside a heading, assert
+  `getByRole('heading', { name })` — spreading `useSortable` `attributes` onto the
+  heading itself adds `role="button"` and destroys the heading role.
+
+### Optimistic-update assertions
+To assert an optimistic state change *before* the request settles, return a manually
+controlled promise from the API mock, call the action inside a **sync** `act()`,
+assert, then resolve inside `await act(async () => ...)`:
+```ts
+let resolveCall: () => void = () => {};
+mockedApi.reorderFeeds.mockReturnValueOnce(new Promise((r) => { resolveCall = () => r({ data: [] }); }) as never);
+let pending: Promise<void> = Promise.resolve();
+act(() => { pending = result.current.reorderFeeds([3, 1, 2]); });
+expect(result.current.feeds.map((f) => f.id)).toEqual([3, 1, 2]);
+await act(async () => { resolveCall(); await pending; });
+```
+For "state must survive this action" checks, compare object identity
+(`expect(result.current.feedVideos).toBe(before)`) plus the mock call count of the
+fetcher that must NOT run.
+
+### Shared icon mock
+`src/test/setup.ts` mocks `@mui/icons-material` with an explicit export list. Rendering
+a component that imports an icon missing from that list fails with
+`No "<Icon>" export is defined on the "@mui/icons-material" mock` — add the icon to the
+list rather than mocking the barrel per-test.
+

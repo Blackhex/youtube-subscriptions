@@ -16,10 +16,15 @@ export function useSync() {
         clearInterval(pollingRef.current);
         pollingRef.current = null;
 
-        const msg = data.subs_synced
-          ? `Sync complete: ${data.subs_synced} subscriptions, ${data.fetched_new} new videos`
-          : 'Sync complete';
-        dispatch({ type: 'SHOW_TOAST', message: msg, toastType: 'success' });
+        if (data.errors > 0 && data.subs_synced === 0 && data.processed === 0) {
+          const errorMsg = data.current_channel || 'Sync failed';
+          dispatch({ type: 'SHOW_TOAST', message: errorMsg, toastType: 'error' });
+        } else {
+          const msg = data.subs_synced
+            ? `Sync complete: ${data.subs_synced} subscriptions, ${data.fetched_new} new videos`
+            : 'Sync complete';
+          dispatch({ type: 'SHOW_TOAST', message: msg, toastType: data.errors > 0 ? 'error' : 'success' });
+        }
       }
     } catch {
       // Ignore polling errors
@@ -52,7 +57,7 @@ export function useSync() {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
-  }, []);
+  }, [pollStatus]);
 
   // When sync state changes to running, ensure polling is active
   useEffect(() => {

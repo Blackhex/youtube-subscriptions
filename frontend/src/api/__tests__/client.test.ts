@@ -69,4 +69,10 @@ describe('API Client', () => {
     await apiModule.exportCategories();
     expect(mockedInstance.get).toHaveBeenCalledWith('/categories/export/', { responseType: 'blob' });
   });
+
+  it('reorderFeeds posts ordered ids to the reorder endpoint', async () => {
+    mockedInstance.post.mockResolvedValueOnce({ data: [] });
+    await apiModule.reorderFeeds([3, 1, 2]);
+    expect(mockedInstance.post).toHaveBeenCalledWith('/feeds/reorder/', { ordered_ids: [3, 1, 2] });
+  });
 });

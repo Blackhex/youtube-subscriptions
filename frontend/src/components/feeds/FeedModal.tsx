@@ -26,7 +26,9 @@ export default function FeedModal({ feed, categories, onSave, onDelete, onClose 
   const [categoryGroups, setCategoryGroups] = useState<number[][]>(
     feed?.filter_category_ids?.length ? feed.filter_category_ids : [[]]
   );
-  const [videoType, setVideoType] = useState<string>(feed?.filter_video_type ?? '');
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(
+    new Set(feed?.filter_video_type ? feed.filter_video_type.split(',').map(t => t.trim()).filter(Boolean) : [])
+  );
   const [minDuration, setMinDuration] = useState<string>(
     feed?.filter_min_duration != null ? String(Math.round(feed.filter_min_duration / 60)) : ''
   );
@@ -71,7 +73,7 @@ export default function FeedModal({ feed, categories, onSave, onDelete, onClose 
     const data: Partial<Feed> = {
       name: name.trim(),
       filter_category_ids: filterCategoryIds.length > 0 ? filterCategoryIds : null,
-      filter_video_type: videoType || null,
+      filter_video_type: selectedTypes.size > 0 ? Array.from(selectedTypes).join(',') : null,
       filter_min_duration: minDuration ? Number(minDuration) * 60 : null,
       filter_max_duration: maxDuration ? Number(maxDuration) * 60 : null,
       filter_max_age_days: maxAgeDays ? Number(maxAgeDays) : null,
@@ -79,7 +81,7 @@ export default function FeedModal({ feed, categories, onSave, onDelete, onClose 
     };
 
     onSave(data);
-  }, [name, categoryGroups, videoType, minDuration, maxDuration, maxAgeDays, playState, onSave]);
+  }, [name, categoryGroups, selectedTypes, minDuration, maxDuration, maxAgeDays, playState, onSave]);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -134,12 +136,22 @@ export default function FeedModal({ feed, categories, onSave, onDelete, onClose 
 
           <div className="form-group">
             <label>Video Type</label>
-            <select value={videoType} onChange={(e) => setVideoType(e.target.value)}>
-              <option value="">All</option>
-              <option value="video">Regular Videos</option>
-              <option value="short">Shorts</option>
-              <option value="live">Live</option>
-            </select>
+            <div className="d-flex flex-wrap gap-2">
+              {([['video', 'Regular'], ['short', 'Shorts'], ['live', 'Live'], ['upcoming', 'Upcoming']] as const).map(([value, label]) => (
+                <label key={value} className="category-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={selectedTypes.has(value)}
+                    onChange={() => setSelectedTypes(prev => {
+                      const next = new Set(prev);
+                      if (next.has(value)) next.delete(value); else next.add(value);
+                      return next;
+                    })}
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
           </div>
 
           <div className="form-group">

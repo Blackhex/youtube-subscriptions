@@ -1,12 +1,15 @@
+from datetime import timedelta
 from unittest.mock import patch, MagicMock
 
 from django.test import TestCase
+from django.utils import timezone
 
-from subscriptions.models import Category, Feed, Subscription, SubscriptionCategory
+from subscriptions.models import Category, Feed, Subscription, SubscriptionCategory, Video
 from subscriptions.sync import (
     _get_channels_to_sync,
     get_sync_state,
     is_sync_running,
+    sync_videos_phase,
     _sync_state,
     _sync_lock,
 )
@@ -88,3 +91,23 @@ class GetChannelsToSyncTest(TestCase):
         channels = _get_channels_to_sync()
         # Falls back to all channels
         self.assertEqual(set(channels), {"UC_sync1", "UC_sync2", "UC_sync3"})
+
+
+class SyncVideosPhaseTest(TestCase):
+    """Tests for sync_videos_phase without watch progress (now handled on-demand)."""
+
+    def setUp(self):
+        self.sub = Subscription.objects.create(
+            channel_id="UC_progress", channel_title="Progress Channel",
+        )
+
+    @patch('subscriptions.sync._sync_single_channel', return_value=0)
+    def test_sync_completes_without_progress_fetch(self, mock_channel_sync):
+        """sync_videos_phase completes without fetching watch progress."""
+        mock_yt = MagicMock()
+        mock_yt.credentials = MagicMock()
+
+        sync_videos_phase(mock_yt)
+
+        # fetch_watch_history should NOT be called (removed)
+        mock_yt.fetch_watch_history.assert_not_called()

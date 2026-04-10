@@ -60,7 +60,7 @@ class VideoSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'video_id', 'channel_id', 'title', 'thumbnail_url',
             'published_at', 'duration_seconds', 'video_type',
-            'playback_progress', 'channel_title',
+            'playback_progress', 'watched_locally', 'channel_title',
         ]
 
     def get_thumbnail_url(self, obj):

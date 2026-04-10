@@ -136,7 +136,7 @@ DRF serializers for all models:
 ### 2.1 Create `subscriptions/youtube_service.py`
 Implement `YouTubeService` class (identical logic to original):
 
-1. **OAuth authentication**: `_get_credentials()`, `from_credentials()` factory
+1. **OAuth authentication**: `_get_credentials()`, `from_credentials()` factory, state-bound local/extension callback completion, atomic credential persistence and logout generation control
 2. **Data API v3 methods**: fetch subscriptions, uploads, video details, channel details, playlists, playlist items, create/delete playlists
 3. **InnerTube API methods**: FEchannels (subscriptions)
 4. **YouTube Lounge API**: cast_to_receiver, get_now_playing
@@ -401,6 +401,53 @@ python manage.py collectstatic
 ```
 
 **Milestone:** Full application served from Django in production mode.
+
+---
+
+## Phase 16: Remote Browser and Extension Compatibility
+
+### 16.1 Exact App-Origin Permission
+- Keep loopback origins as built-in development targets
+- Require an exact user-approved HTTPS origin for a remote app
+- Request only that Chrome host permission and dynamically register `content.js`
+- Re-check the configured origin, port and permission before cookies or imports leave the extension
+
+### 16.2 Installed-App OAuth Relay
+- Keep the Desktop OAuth redirect exactly `http://localhost:8085/`
+- Bind the same-machine callback server to loopback only
+- Observe only exact top-level callbacks in extension `webNavigation`
+- Scrub or close the callback tab before relaying its one-time URL
+- Complete the original in-memory Flow through `POST /api/auth/oauth/callback/`
+- Serialize callback exchange, refresh and logout with generation checks and atomic token writes
+
+### 16.3 Validation and Limits
+- Run backend OAuth service/API race tests and the extension harness
+- Keep OAuth start/completion on one Django process
+- Require trusted HTTPS for remote origins
+- Treat API caller authentication as a separate deployment phase; the YouTube OAuth grant is not an app login
+
+**Milestone:** A browser and extension on another machine can complete fresh YouTube OAuth against a single-process backend without changing the registered Desktop OAuth redirect.
+
+---
+
+## Phase 17: Feed Column Ordering
+
+**Backend** (`subscriptions/views.py`)
+- `FeedViewSet.perform_create`: append new feeds (`sort_order = Max + 1`) instead of leaving them at the default `0`
+- `FeedViewSet.reorder` → `POST /api/feeds/reorder/` with `{ ordered_ids }`, validated (list / ≤1000 / int-coercible) and atomic
+- No migration — `Feed.sort_order` and `Meta.ordering` already existed
+
+**Frontend**
+- `api/client.ts`: `reorderFeeds()`
+- `useFeeds()`: `reorderFeeds()` with optimistic reorder, exact-id-set guard, re-fetch recovery; `feedVideos` untouched so no videos are refetched
+- `<FeedColumn>`: `useSortable`, drag activator is the title span inside the `<h3>`
+- `<FeedsSection>`: horizontal `DndContext` / `SortableContext` around feed columns only; custom a11y announcements
+- `app.css`: `.feed-title-handle` (24px-tall hit target, inset focus ring, `touch-action: none`) and `.column.is-drag-source`
+
+**Testing**
+- Playwright introduced for E2E (`frontend/playwright.config.ts`, `frontend/e2e/`); Vitest config excludes `e2e/**`
+
+**Milestone:** Feed columns reorder by dragging their title (mouse and keyboard), the order persists, and new feeds appear last.
 
 ---
 

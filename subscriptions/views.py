@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 import requests as http_requests
 from django.db import models, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from django.http import FileResponse, JsonResponse
 from django.utils import timezone
 from rest_framework import status
@@ -515,6 +515,38 @@ class FeedViewSet(ModelViewSet):
     queryset = Feed.objects.all().order_by('sort_order', 'name')
     serializer_class = FeedSerializer
 
+    def perform_create(self, serializer):
+        if serializer.validated_data.get('sort_order') is not None:
+            serializer.save()
+            return
+        max_order = Feed.objects.aggregate(Max('sort_order'))['sort_order__max']
+        serializer.save(sort_order=0 if max_order is None else max_order + 1)
+
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        raw_ids = request.data.get('ordered_ids', [])
+        if not isinstance(raw_ids, list):
+            return Response(
+                {'error': 'ordered_ids must be a list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(raw_ids) > 1000:
+            return Response(
+                {'error': 'ordered_ids must contain at most 1000 items.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            ordered_ids = [int(i) for i in raw_ids]
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'ordered_ids must contain integers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            for idx, feed_id in enumerate(ordered_ids):
+                Feed.objects.filter(id=feed_id).update(sort_order=idx)
+        return Response({'status': 'ok'})
+
     @action(detail=True, methods=['get'], url_path='videos')
     def videos(self, request, pk=None):
         feed = self.get_object()
@@ -536,9 +568,11 @@ class FeedViewSet(ModelViewSet):
                 ).values_list('subscription__channel_id', flat=True)
                 qs = qs.filter(channel_id__in=channel_ids)
 
-        # 2. Video type
+        # 2. Video type (supports comma-separated values for multi-select)
         if feed.filter_video_type:
-            qs = qs.filter(video_type=feed.filter_video_type)
+            types = [t.strip() for t in feed.filter_video_type.split(',') if t.strip()]
+            if types:
+                qs = qs.filter(video_type__in=types)
 
         # 3. Duration
         if feed.filter_min_duration is not None:
@@ -564,6 +598,43 @@ class FeedViewSet(ModelViewSet):
         total = qs.count()
         offset = (page - 1) * per_page
         items = qs[offset:offset + per_page]
+
+        # 8. Fetch watch progress for displayed videos
+        # Get unique channel IDs from this page's videos
+        page_channel_ids = set()
+        for video in items:
+            if video.channel_id:
+                page_channel_ids.add(video.channel_id)
+
+        if page_channel_ids:
+            try:
+                from .youtube_service import YouTubeService
+                yt = YouTubeService()
+                # Fetch progress per channel and merge
+                all_progress = {}
+                for ch_id in page_channel_ids:
+                    channel_progress = yt.fetch_channel_video_progress(ch_id)
+                    all_progress.update(channel_progress)
+
+                # Update videos in DB with fresh progress
+                if all_progress:
+                    page_video_ids = [v.video_id for v in items]
+                    for vid_id in page_video_ids:
+                        progress = all_progress.get(vid_id)
+                        if progress is not None:
+                            Video.objects.filter(video_id=vid_id).update(playback_progress=progress)
+                        else:
+                            # Video not in channel browse = not watched (or channel didn't return it)
+                            # Only reset if video currently has progress
+                            Video.objects.filter(
+                                video_id=vid_id,
+                                playback_progress__isnull=False,
+                            ).update(playback_progress=None, watched_locally=False)
+
+                    # Refresh items from DB to get updated progress
+                    items = qs[offset:offset + per_page]
+            except Exception:
+                logger.warning("Failed to fetch watch progress for feed videos")
 
         serializer = VideoSerializer(items, many=True)
         return Response({
@@ -758,10 +829,39 @@ class QueueCastView(APIView):
         return Response(session_data)
 
 
+class QueueCastStatusView(APIView):
+    def get(self, request):
+        lounge_session_path = os.path.join('media', 'lounge_session.json')
+        if not os.path.exists(lounge_session_path):
+            return Response({'active': False, 'now_playing': None})
+
+        try:
+            with open(lounge_session_path, 'r') as session_file:
+                lounge_session = json.load(session_file)
+            from .youtube_service import YouTubeService
+            now_playing = YouTubeService().get_now_playing(lounge_session)
+        except Exception:
+            logger.warning("Failed to detect active Cast session")
+            return Response({'active': False, 'now_playing': None})
+
+        active = bool(
+            now_playing
+            and now_playing.get('video_id')
+            and str(now_playing.get('state')) != '0'
+        )
+        return Response({
+            'active': active,
+            'now_playing': now_playing if active else None,
+        })
+
+
 class QueueRefreshProgressView(APIView):
     def post(self, request):
         lounge_session_path = os.path.join('media', 'lounge_session.json')
         lounge_session = None
+        now_playing_video_id = None
+        lounge_progress = None
+        completed_video_ids = set()
 
         # 1. Try to load lounge session
         if os.path.exists(lounge_session_path):
@@ -779,21 +879,43 @@ class QueueRefreshProgressView(APIView):
                 now_playing = yt.get_now_playing(lounge_session)
                 if now_playing and now_playing.get('video_id'):
                     vid = now_playing['video_id']
+                    now_playing_video_id = vid
+                    receiver_video_ids = now_playing.get('video_ids') or []
+                    if vid in receiver_video_ids:
+                        completed_video_ids.update(
+                            receiver_video_ids[:receiver_video_ids.index(vid)]
+                        )
+                    current_item = QueueItem.objects.filter(video_id=vid).first()
+                    if current_item:
+                        completed_video_ids.update(
+                            QueueItem.objects.filter(
+                                sort_order__lt=current_item.sort_order
+                            ).values_list('video_id', flat=True)
+                        )
+                        if str(now_playing.get('state')) == '0':
+                            completed_video_ids.add(vid)
+                    if completed_video_ids:
+                        Video.objects.filter(video_id__in=completed_video_ids).update(
+                            playback_progress=100,
+                            watched_locally=True,
+                        )
                     # Estimate progress if current_time available
-                    try:
-                        video = Video.objects.get(video_id=vid)
-                        current_time = float(now_playing.get('current_time', 0))
-                        if video.duration_seconds and video.duration_seconds > 0:
-                            progress = int((current_time / video.duration_seconds) * 100)
-                            progress = min(progress, 100)
-                            video.playback_progress = progress
-                            video.save(update_fields=['playback_progress'])
-                    except Video.DoesNotExist:
-                        pass
+                    if vid not in completed_video_ids:
+                        try:
+                            video = Video.objects.get(video_id=vid)
+                            current_time = float(now_playing.get('current_time', 0))
+                            if video.duration_seconds and video.duration_seconds > 0:
+                                progress = int((current_time / video.duration_seconds) * 100)
+                                progress = min(progress, 100)
+                                lounge_progress = progress
+                                video.playback_progress = progress
+                                video.save(update_fields=['playback_progress'])
+                        except Video.DoesNotExist:
+                            pass
             except Exception:
                 logger.exception("Failed to get now playing from lounge")
 
-        # 3. Fetch watch history for queue videos
+        # 3. Fetch watch progress for queue videos
         queue_video_ids = list(
             QueueItem.objects.values_list('video__video_id', flat=True)
         )
@@ -801,15 +923,38 @@ class QueueRefreshProgressView(APIView):
             try:
                 from .youtube_service import YouTubeService
                 yt = YouTubeService()
-                progress_map = yt.fetch_watch_history()
-                for vid, progress in progress_map.items():
-                    if vid in queue_video_ids:
+                # Get unique channel IDs for queue videos
+                queue_channel_ids = set(
+                    Video.objects.filter(video_id__in=queue_video_ids)
+                    .values_list('channel_id', flat=True)
+                    .distinct()
+                )
+                all_progress = {}
+                for ch_id in queue_channel_ids:
+                    channel_progress = yt.fetch_channel_video_progress(ch_id)
+                    all_progress.update(channel_progress)
+
+                for vid in queue_video_ids:
+                    if vid in completed_video_ids:
+                        continue
+                    progress = all_progress.get(vid)
+                    if vid == now_playing_video_id:
+                        if progress is not None and (
+                            lounge_progress is None or progress > lounge_progress
+                        ):
+                            Video.objects.filter(video_id=vid).update(playback_progress=progress)
+                        continue
+                    if progress is not None:
                         Video.objects.filter(video_id=vid).update(playback_progress=progress)
             except Exception:
-                logger.exception("Failed to fetch watch history")
+                logger.exception("Failed to fetch watch progress for queue")
 
         # 4. Auto-remove watched items (progress >= 95%)
         watched_items = QueueItem.objects.filter(video__playback_progress__gte=95)
+        removed_video_ids = list(dict.fromkeys([
+            *completed_video_ids,
+            *watched_items.values_list('video_id', flat=True),
+        ]))
         removed_count = watched_items.count()
         watched_items.delete()
 
@@ -819,6 +964,7 @@ class QueueRefreshProgressView(APIView):
         return Response({
             'items': serializer.data,
             'removed_count': removed_count,
+            'removed_video_ids': removed_video_ids,
         })
 
 
@@ -1013,3 +1159,134 @@ class PlaylistCastView(APIView):
             return Response({'error': f'Cast failed: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
 
         return Response(session_data)
+
+
+class OAuthView(APIView):
+    """Manage Google OAuth for YouTube API access."""
+
+    def get(self, request):
+        """Check OAuth authentication status."""
+        from .youtube_service import YouTubeService
+        return Response(YouTubeService.get_oauth_state())
+
+    def post(self, request):
+        """Start OAuth flow — returns auth URL for frontend to open."""
+        from .youtube_service import YouTubeService
+        state = YouTubeService.get_oauth_state()
+        if state['authenticated']:
+            return Response({'status': 'already_authenticated', **state})
+        if state['in_progress']:
+            return Response({'status': 'already_in_progress', **state})
+
+        auth_url = YouTubeService.start_oauth()
+        return Response({
+            'status': 'started',
+            'auth_url': auth_url,
+            **YouTubeService.get_oauth_state(),
+        })
+
+    def delete(self, request):
+        """Delete OAuth token (logout)."""
+        from .youtube_service import YouTubeService
+        if os.path.exists(YouTubeService.TOKEN_FILE):
+            os.remove(YouTubeService.TOKEN_FILE)
+        return Response({'status': 'ok', **YouTubeService.get_oauth_state()})
+
+
+class YouTubeSessionView(APIView):
+    """Manage YouTube browser session for cookie-based features."""
+
+    def get(self, request):
+        """Check YouTube session status."""
+        from .youtube_service import YouTubeCookieAPI
+        return Response(YouTubeCookieAPI.get_login_state())
+
+    def delete(self, request):
+        """Delete YouTube session."""
+        from .youtube_service import YouTubeCookieAPI
+        YouTubeCookieAPI.logout()
+        return Response({'status': 'ok', **YouTubeCookieAPI.get_login_state()})
+
+
+class YouTubeSessionCookiesView(APIView):
+    """Accept YouTube cookies from the browser extension."""
+
+    def post(self, request):
+        """Import YouTube cookies to create a browser session.
+        
+        Expected body: { "cookies": [ { "name": "...", "value": "...", "domain": "...", ... } ] }
+        Cookies are in Playwright storage state format.
+        """
+        from .youtube_service import YouTubeCookieAPI
+
+        cookies = request.data.get('cookies')
+        if not cookies or not isinstance(cookies, list):
+            return Response({'error': 'cookies array required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate SAPISID is present
+        has_sapisid = any(
+            c.get('name') in ('SAPISID', '__Secure-3PAPISID')
+            for c in cookies
+        )
+        if not has_sapisid:
+            return Response(
+                {'error': 'SAPISID cookie not found. Make sure you are signed in to YouTube.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Save as Playwright browser state format
+        state = {'cookies': cookies, 'origins': []}
+        state_file = YouTubeCookieAPI._STATE_FILE
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        with open(state_file, 'w') as f:
+            json.dump(state, f)
+
+        logger.info("YouTube session imported from extension (%d cookies)", len(cookies))
+        return Response({
+            'status': 'ok',
+            **YouTubeCookieAPI.get_login_state(),
+        })
+
+
+class MarkWatchedView(APIView):
+    def post(self, request, video_id):
+        try:
+            video = Video.objects.get(video_id=video_id)
+        except Video.DoesNotExist:
+            return Response({'error': 'Video not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Try YouTube propagation first — only mark locally if it succeeds
+        youtube_propagated = False
+        youtube_session_needed = False
+        try:
+            from .youtube_service import YouTubeCookieAPI
+            session_state = YouTubeCookieAPI.get_login_state()
+            if not session_state['authenticated']:
+                youtube_session_needed = True
+            else:
+                cookie_api = YouTubeCookieAPI()
+                youtube_propagated = cookie_api.report_watch(video_id)
+        except Exception:
+            logger.warning("Failed to report watch to YouTube for %s", video_id)
+
+        if not youtube_propagated:
+            return Response({
+                'status': 'not_propagated',
+                'video_id': video_id,
+                'playback_progress': video.playback_progress,
+                'youtube_propagated': False,
+                'youtube_session_needed': youtube_session_needed,
+            })
+
+        video.playback_progress = 100
+        video.watched_locally = True
+        video.save(update_fields=['playback_progress', 'watched_locally'])
+
+        return Response({
+            'status': 'ok',
+            'video_id': video_id,
+            'playback_progress': 100,
+            'watched_locally': True,
+            'youtube_propagated': True,
+            'youtube_session_needed': False,
+        })

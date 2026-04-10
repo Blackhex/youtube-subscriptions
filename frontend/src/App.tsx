@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppProvider, useAppContext } from './context/AppContext';
+import { useAppContext } from './context/AppContext';
+import { AppProvider } from './context/AppProvider';
 import Navbar from './components/layout/Navbar';
 import Toast from './components/layout/Toast';
 import Spinner from './components/layout/Spinner';
-import ConfirmDialog, { useConfirm } from './components/layout/ConfirmDialog';
+import ConfirmDialog from './components/layout/ConfirmDialog';
+import { useConfirm } from './hooks/useConfirm';
 import SubscriptionsSection from './components/subscriptions/SubscriptionsSection';
 import FeedsSection from './components/feeds/FeedsSection';
 import PlaylistsSection from './components/playlists/PlaylistsSection';
@@ -102,7 +104,7 @@ function AppContent() {
         onAISuggestions={handleAISuggestions}
         onExport={handleExport}
         onImport={handleImport}
-        onSync={() => startSync()}
+        onSync={startSync}
       />
       <div className="app-body">
         {state.activeSection === 'feeds' && (

@@ -20,6 +20,7 @@ urlpatterns = [
     path("queue/clear/", views.QueueClearView.as_view(), name="queue-clear"),
     path("queue/create-playlist/", views.QueueCreatePlaylistView.as_view(), name="queue-create-playlist"),
     path("queue/cast/", views.QueueCastView.as_view(), name="queue-cast"),
+    path("queue/cast/status/", views.QueueCastStatusView.as_view(), name="queue-cast-status"),
     path("queue/refresh-progress/", views.QueueRefreshProgressView.as_view(), name="queue-refresh-progress"),
     path("queue/", views.QueueListCreateView.as_view(), name="queue-list-create"),
     path("queue/<int:pk>/", views.QueueDetailView.as_view(), name="queue-detail"),
@@ -30,4 +31,11 @@ urlpatterns = [
     path("playlists/<str:playlist_id>/items/reorder/", views.PlaylistItemsReorderView.as_view(), name="playlist-items-reorder"),
     path("playlists/<str:playlist_id>/items/<str:item_id>/", views.PlaylistItemDetailView.as_view(), name="playlist-item-detail"),
     path("playlists/<str:playlist_id>/cast/", views.PlaylistCastView.as_view(), name="playlist-cast"),
+    # Mark watched
+    path("videos/<str:video_id>/mark-watched/", views.MarkWatchedView.as_view(), name="mark-watched"),
+    # OAuth
+    path("auth/oauth/", views.OAuthView.as_view(), name="oauth"),
+    # YouTube session
+    path("auth/youtube-session/", views.YouTubeSessionView.as_view(), name="youtube-session"),
+    path("auth/youtube-session/cookies/", views.YouTubeSessionCookiesView.as_view(), name="youtube-session-cookies"),
 ] + router.urls

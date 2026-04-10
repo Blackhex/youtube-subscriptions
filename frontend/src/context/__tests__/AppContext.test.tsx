@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, act } from '@testing-library/react';
-import { AppProvider, useAppContext } from '../AppContext';
+import { useAppContext } from '../AppContext';
+import { AppProvider } from '../AppProvider';
 import type { AppAction } from '../AppContext';
 import type { SyncState } from '../../types';
 

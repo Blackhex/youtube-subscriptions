@@ -95,6 +95,20 @@ For each implementation phase from the [Implementation Plan](../../../docs/06-im
 - [ ] No critical security issues
 - [ ] Code review findings addressed
 
+#### Companion Extension Changes
+- [ ] Full harness passes: `node extension/tests/harness.mjs`
+- [ ] Every shipped script and the harness pass `node --check`
+- [ ] `git diff --check` and editor diagnostics are clean
+- [ ] Reload the unpacked extension and inspect the real popup flow when Chrome is available
+- [ ] Keep smoke verification non-destructive by default: preview sources, counts, warnings, focus and token behavior without committing an import
+- [ ] Record whether an import was committed; never imply that preview-only verification changed the database
+
+#### New Tooling / Test Runners
+- [ ] A newly added test runner does not collide with the incumbent's collection globs. Vitest's default glob is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, so adding `e2e/*.spec.ts` silently breaks `npm test` with *"Playwright Test did not expect test.describe() to be called here"*. Fix with `exclude: [...configDefaults.exclude, 'e2e/**']` — spread the defaults, never replace them
+- [ ] Verify the incumbent runner's file/test counts are unchanged before and after, so the fix didn't over-correct. Enumerate specs independently (e.g. `find src -name "*.test.ts*"`) rather than trusting the runner's own summary
+- [ ] New directories are covered by a tsconfig project. `tsc --noEmit` passes vacuously on files outside every `include`. Prove coverage with `tsc -p <project> --noEmit --listFiles`
+- [ ] New tool output paths are gitignored, and no screenshots/traces were left in the repo root
+
 ### 3. Gate Decision
 
 | Rating | Criteria | Action |

@@ -72,11 +72,11 @@ Two button styles (CSS classes in `app.css`):
 ### 3.1 Feeds Section — `<FeedsSection>`
 
 **Layout:** Horizontal scrolling column layout (CSS `display: flex; overflow-x: auto`)
-- First column: `<QueueColumn>` (always visible)
-- Subsequent columns: `<FeedColumn>` for each configured Feed
+- First column: `<QueueColumn>` (always visible, pinned first — not reorderable)
+- Subsequent columns: `<FeedColumn>` for each configured Feed, drag-reorderable (see §5)
 
 **`<FeedColumn>`:**
-- Header: Feed name + Edit button
+- Header: Feed name + Edit button. The name is wrapped in a `<span class="feed-title-handle">` inside the `<h3>`, which is the drag activator for column reordering
 - `<FilterTags>`: Shows active filters as pills (categories, type, duration, age, play state)
 - Scrollable `<VideoItem>` list with infinite scroll (via `IntersectionObserver` or `useInfiniteScroll` hook)
 
@@ -197,9 +197,19 @@ All drag-and-drop uses **`@dnd-kit`** library:
 - `<SortableContext>` wraps playlist items
 - `onDragEnd` → persist via `POST /api/playlists/{id}/items/reorder/`
 
+### Feed Column Reorder — `<FeedsSection>`
+- `<DndContext>` + `<SortableContext strategy={horizontalListSortingStrategy}>` wrap the `<FeedColumn>` list; `<QueueColumn>` is rendered outside and stays pinned first
+- **Deviation from the `DragHandle` convention above:** the activator is the column title itself (`.feed-title-handle` inside the `<h3>`), not a `drag_indicator` icon. Column headers have no room for an extra icon beside the Edit button, and the title is the natural window-title grab target
+- The `aria-label` is deliberately omitted from the activator so it does not override the `<h3>`'s accessible name; `@dnd-kit` supplies `role="button"`, `tabIndex=0` and `aria-roledescription="sortable"`
+- `<DndContext accessibility={{ announcements }}>` maps feed ids to names and 1-based positions, replacing `@dnd-kit`'s default "draggable item 5 / droppable area 4" announcements
+- `onDragEnd` → `useFeeds().reorderFeeds()` reorders local state optimistically (skipped unless the id set matches the current list exactly) and persists via `POST /api/feeds/reorder/`. `feedVideos` is keyed by feed id and is left untouched, so no videos are refetched
+- Dragging applies `position: relative` + `zIndex: 10` and the `.column.is-drag-source` class (dashed primary outline + dimmed header). The usual `opacity: 0.5` is **not** used here — 50% opacity already means "watched" on `.video-item`, so it would make every thumbnail in the dragged column read as watched
+
 All provide:
 - Visual feedback: `dragging` style (opacity 0.5), `drop-target` (primary border)
 - Keyboard accessibility via `@dnd-kit`'s built-in keyboard sensor
+- Sensors: `PointerSensor` with `activationConstraint: { distance: 5 }` (so buttons inside draggable regions stay clickable) + `KeyboardSensor` with `sortableKeyboardCoordinates`
+- Activator elements need `touch-action: none`, or the browser claims touch/pen gestures for the surrounding scroll container and cancels the drag
 
 ## 6. Google Cast Integration
 
@@ -283,7 +293,7 @@ AppContext (React Context + useReducer)
 |------|---------------|
 | `useCategories()` | CRUD, reorder, import/export, tree operations |
 | `useSubscriptions()` | Paginated fetch, search, selection, assignment |
-| `useFeeds()` | CRUD, video loading with infinite scroll |
+| `useFeeds()` | CRUD, video loading with infinite scroll, `reorderFeeds()` (optimistic column order + `POST /api/feeds/reorder/`) |
 | `useQueue()` | Add/remove/reorder, create playlist |
 | `usePlaylists()` | Fetch playlists + items, reorder, delete |
 | `useSync()` | Trigger sync, poll status, update UI |
@@ -306,9 +316,10 @@ AppContext (React Context + useReducer)
 │   ├── <QueueColumn>
 │   │   ├── <QueueItem> (× n, sortable)
 │   │   └── @dnd-kit SortableContext
-│   └── <FeedColumn> (× n)
-│       ├── <FilterTags>
-│       └── <VideoItem> (× n, infinite scroll)
+│   └── @dnd-kit DndContext + SortableContext (horizontal)
+│       └── <FeedColumn> (× n, sortable by title)
+│           ├── <FilterTags>
+│           └── <VideoItem> (× n, infinite scroll)
 ├── {activeSection === 'subscriptions' && <SubscriptionsSection>}
 │   ├── <CategoryTree>
 │   │   └── <CategoryNode> (recursive, sortable)

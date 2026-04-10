@@ -67,14 +67,16 @@ def run_full_sync(force: bool = False):
 
         _sync_state['phase'] = 'videos'
         sync_videos_phase(yt_service, force=force)
-    except Exception:
+    except Exception as e:
         logger.exception("Full sync failed")
+        with _sync_lock:
+            _sync_state['errors'] += 1
+            _sync_state['current_channel'] = str(e)
     finally:
         with _sync_lock:
             _sync_state['running'] = False
             _sync_state['finished_at'] = timezone.now().isoformat()
             _sync_state['phase'] = None
-            _sync_state['current_channel'] = None
 
 
 def run_video_sync(force: bool = False, channel_ids: list = None):
@@ -189,8 +191,9 @@ def _get_channels_to_sync() -> list[str]:
     return list(Subscription.objects.values_list('channel_id', flat=True))
 
 
-def _sync_single_channel(yt_service: YouTubeService, channel_id: str, force: bool):
+def _sync_single_channel(credentials, channel_id: str, force: bool):
     """Sync videos for a single channel. Returns count of new videos."""
+    yt_service = YouTubeService.from_credentials(credentials)
     try:
         sub = Subscription.objects.get(channel_id=channel_id)
     except Subscription.DoesNotExist:
@@ -251,6 +254,20 @@ def _sync_single_channel(yt_service: YouTubeService, channel_id: str, force: boo
                 video_type=details.get('video_type'),
             )
 
+    # Backfill details for existing videos missing duration
+    missing_details_ids = list(
+        Video.objects.filter(channel_id=channel_id, duration_seconds__isnull=True)
+        .exclude(video_id__in=new_video_ids)
+        .values_list('video_id', flat=True)
+    )
+    if missing_details_ids:
+        video_details = yt_service.fetch_video_details(missing_details_ids)
+        for vid_id, details in video_details.items():
+            Video.objects.filter(video_id=vid_id).update(
+                duration_seconds=details.get('duration_seconds'),
+                video_type=details.get('video_type'),
+            )
+
     with _sync_lock:
         _sync_state['fetched_new'] += len(new_video_ids)
 
@@ -281,7 +298,7 @@ def sync_videos_phase(yt_service: YouTubeService, force: bool = False, channel_i
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
-            executor.submit(_sync_single_channel, yt_service, ch_id, force): ch_id
+            executor.submit(_sync_single_channel, yt_service.credentials, ch_id, force): ch_id
             for ch_id in channels_to_sync
         }
         for future in as_completed(futures):
@@ -292,18 +309,6 @@ def sync_videos_phase(yt_service: YouTubeService, force: bool = False, channel_i
                 logger.exception("Error syncing channel %s", ch_id)
                 with _sync_lock:
                     _sync_state['errors'] += 1
-
-    # Fetch watch progress after all channels synced
-    try:
-        progress_map = yt_service.fetch_watch_history()
-        if progress_map:
-            for video_id, progress in progress_map.items():
-                Video.objects.filter(video_id=video_id).update(
-                    playback_progress=progress
-                )
-            logger.info("Updated watch progress for %d videos", len(progress_map))
-    except Exception:
-        logger.warning("Failed to fetch watch progress, continuing")
 
     logger.info("Videos sync complete: %d new videos, %d errors, %d skipped",
                 _sync_state['fetched_new'], _sync_state['errors'], _sync_state['skipped'])

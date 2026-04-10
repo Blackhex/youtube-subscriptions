@@ -1,5 +1,5 @@
 import { render } from '@testing-library/react';
-import { AppProvider } from '../context/AppContext';
+import { AppProvider } from '../context/AppProvider';
 import type { Category, Subscription, Video, Feed, QueueItem } from '../types';
 
 export function renderWithProviders(ui: React.ReactElement) {

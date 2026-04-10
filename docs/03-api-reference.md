@@ -441,6 +441,27 @@ Create a new feed.
 }
 ```
 
+**Ordering:** `perform_create` appends the feed to the end — `sort_order` is set to `Max(sort_order) + 1`, or `0` when no feeds exist. `sort_order` is writable (`FeedSerializer` uses `fields = '__all__'`), so an explicitly supplied non-null value is honoured instead; `null` is rejected by validation because the model field is non-nullable.
+
+### `POST /api/feeds/reorder/`
+Persist drag-and-drop column order. Custom `@action(detail=False)`.
+
+**Request Body:**
+```json
+{ "ordered_ids": [3, 1, 2] }
+```
+
+Each feed's `sort_order` is set to its index in the array, inside a `transaction.atomic()` block. Ids that do not exist are ignored rather than rejected.
+
+**Response (200):** `{"status": "ok"}`
+
+**Response (400):**
+- `{"error": "ordered_ids must be a list."}` — not a list
+- `{"error": "ordered_ids must contain at most 1000 items."}` — more than 1000 elements
+- `{"error": "ordered_ids must contain integers."}` — an element is not int-coercible
+
+A missing `ordered_ids` key defaults to `[]` and returns 200 as a no-op, matching `POST /api/categories/reorder/`. (`POST /api/queue/reorder/` returns 400 for an empty list — a pre-existing inconsistency across the three reorder endpoints.)
+
 ### `PUT /api/feeds/<feed_id>/`
 Update a feed's name and filters.
 

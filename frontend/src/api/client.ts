@@ -48,6 +48,8 @@ export const fetchFeeds = () => api.get<Feed[]>('/feeds/');
 export const createFeed = (data: Partial<Feed>) => api.post<Feed>('/feeds/', data);
 export const updateFeed = (id: number, data: Partial<Feed>) => api.put<Feed>(`/feeds/${id}/`, data);
 export const deleteFeed = (id: number) => api.delete(`/feeds/${id}/`);
+export const reorderFeeds = (ordered_ids: number[]) =>
+  api.post('/feeds/reorder/', { ordered_ids });
 export const fetchFeedVideos = (feedId: number, params: { page?: number; per_page?: number }) =>
   api.get<PaginatedResponse<Video>>(`/feeds/${feedId}/videos/`, { params });
 
@@ -63,8 +65,17 @@ export const createPlaylistFromQueue = () =>
   api.post('/queue/create-playlist/');
 export const castQueue = (screenId: string) =>
   api.post('/queue/cast/', { screen_id: screenId });
+export const fetchQueueCastStatus = () =>
+  api.get<{
+    active: boolean;
+    now_playing: { video_id: string; state: string; current_time: number } | null;
+  }>('/queue/cast/status/');
 export const refreshQueueProgress = () =>
-  api.post<{ items: QueueItem[] }>('/queue/refresh-progress/');
+  api.post<{
+    items: QueueItem[];
+    removed_count: number;
+    removed_video_ids: string[];
+  }>('/queue/refresh-progress/');
 
 // Sync
 export const startFullSync = (force = false) => api.post('/sync/all/', { force });
@@ -89,3 +100,21 @@ export const castPlaylist = (playlistId: string, screenId: string) =>
 // Videos
 export const fetchVideosBatch = (videoIds: string[]) =>
   api.post('/videos/fetch/', { video_ids: videoIds });
+export const markVideoWatched = (videoId: string) =>
+  api.post(`/videos/${videoId}/mark-watched/`);
+
+// YouTube Session
+export const fetchYouTubeSession = () =>
+  api.get<{ authenticated: boolean }>('/auth/youtube-session/');
+export const deleteYouTubeSession = () =>
+  api.delete('/auth/youtube-session/');
+export const importYouTubeCookies = (cookies: unknown[]) =>
+  api.post<{ status: string; authenticated: boolean }>('/auth/youtube-session/cookies/', { cookies });
+
+// OAuth
+export const fetchOAuthStatus = () =>
+  api.get<{ authenticated: boolean; in_progress: boolean; auth_url: string | null; error: string | null }>('/auth/oauth/');
+export const startOAuth = () =>
+  api.post<{ status: string; auth_url: string | null; authenticated: boolean; in_progress: boolean; error: string | null }>('/auth/oauth/');
+export const deleteOAuth = () =>
+  api.delete('/auth/oauth/');

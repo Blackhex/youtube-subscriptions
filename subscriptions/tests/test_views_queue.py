@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock, mock_open, patch
+
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -136,3 +138,236 @@ class QueueClearTest(TestCase):
         data = resp.json()
         self.assertEqual(data['items'], [])
         self.assertEqual(QueueItem.objects.count(), 0)
+
+
+class QueueCastTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        sub = Subscription.objects.create(
+            channel_id="UC_q_cast", channel_title="Cast Channel",
+        )
+        first = Video.objects.create(
+            video_id="v_qcast1", channel_id=sub.channel_id, title="First",
+        )
+        second = Video.objects.create(
+            video_id="v_qcast2", channel_id=sub.channel_id, title="Second",
+        )
+        QueueItem.objects.create(video=second, sort_order=2)
+        QueueItem.objects.create(video=first, sort_order=1)
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_cast_passes_screen_id_and_ordered_queue(self, MockYTService):
+        mock_yt = MagicMock()
+        mock_yt.cast_to_receiver.return_value = {
+            'screen_id': 'real-mdx-screen-id',
+            'sid': 'sid',
+        }
+        MockYTService.return_value = mock_yt
+
+        response = self.client.post(
+            '/api/queue/cast/',
+            {'screen_id': 'real-mdx-screen-id'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['screen_id'], 'real-mdx-screen-id')
+        mock_yt.cast_to_receiver.assert_called_once_with(
+            'real-mdx-screen-id',
+            ['v_qcast1', 'v_qcast2'],
+        )
+
+
+class QueueCastStatusTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_inactive_without_lounge_session(self):
+        with patch('subscriptions.views.os.path.exists', return_value=False):
+            response = self.client.get('/api/queue/cast/status/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'active': False, 'now_playing': None})
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_detects_active_lounge_session(self, MockYTService):
+        MockYTService.return_value.get_now_playing.return_value = {
+            'video_id': 'playing-video',
+            'state': '1',
+            'current_time': 30,
+        }
+        with (
+            patch('subscriptions.views.os.path.exists', return_value=True),
+            patch('builtins.open', mock_open(read_data='{"screen_id": "screen-id"}')),
+        ):
+            response = self.client.get('/api/queue/cast/status/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['active'])
+        self.assertEqual(response.json()['now_playing']['video_id'], 'playing-video')
+
+
+class QueueRefreshProgressTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.sub = Subscription.objects.create(
+            channel_id="UC_q_refresh", channel_title="Refresh Channel",
+        )
+        self.v1 = Video.objects.create(
+            video_id="v_qref1", channel_id="UC_q_refresh",
+            title="Refresh V1", playback_progress=50,
+        )
+        self.v2 = Video.objects.create(
+            video_id="v_qref2", channel_id="UC_q_refresh",
+            title="Refresh V2", playback_progress=70,
+        )
+        self.qi1 = QueueItem.objects.create(video=self.v1, sort_order=0)
+        self.qi2 = QueueItem.objects.create(video=self.v2, sort_order=1)
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_preserves_progress_for_videos_not_in_history(self, MockYTService):
+        """Missing history entries must not erase progress measured from Lounge."""
+        mock_yt = MagicMock()
+        MockYTService.return_value = mock_yt
+        # Channel browse does NOT include v_qref1 or v_qref2
+        mock_yt.fetch_channel_video_progress.return_value = {}
+        mock_yt.get_now_playing.return_value = None
+
+        resp = self.client.post('/api/queue/refresh-progress/')
+        self.assertEqual(resp.status_code, 200)
+
+        self.v1.refresh_from_db()
+        self.v2.refresh_from_db()
+        self.assertEqual(self.v1.playback_progress, 50)
+        self.assertEqual(self.v2.playback_progress, 70)
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_preserves_progress_for_videos_in_history(self, MockYTService):
+        """Queue videos in channel browse get updated to browse values."""
+        mock_yt = MagicMock()
+        MockYTService.return_value = mock_yt
+        mock_yt.fetch_channel_video_progress.return_value = {
+            "v_qref1": 90,
+            "v_qref2": 40,
+        }
+        mock_yt.get_now_playing.return_value = None
+
+        resp = self.client.post('/api/queue/refresh-progress/')
+        self.assertEqual(resp.status_code, 200)
+
+        self.v1.refresh_from_db()
+        self.v2.refresh_from_db()
+        self.assertEqual(self.v1.playback_progress, 90)
+        self.assertEqual(self.v2.playback_progress, 40)
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_live_lounge_progress_is_not_cleared_by_stale_history(self, MockYTService):
+        self.v1.duration_seconds = 200
+        self.v1.save(update_fields=['duration_seconds'])
+        mock_yt = MagicMock()
+        mock_yt.get_now_playing.return_value = {
+            'video_id': 'v_qref1',
+            'state': '1',
+            'current_time': '50',
+        }
+        mock_yt.fetch_channel_video_progress.return_value = {}
+        MockYTService.return_value = mock_yt
+
+        with (
+            patch('subscriptions.views.os.path.exists', return_value=True),
+            patch(
+                'builtins.open',
+                mock_open(read_data='{"screen_id": "screen-id"}'),
+            ),
+        ):
+            resp = self.client.post('/api/queue/refresh-progress/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.v1.refresh_from_db()
+        self.v2.refresh_from_db()
+        self.assertEqual(self.v1.playback_progress, 25)
+        self.assertEqual(self.v2.playback_progress, 70)
+        response_progress = {
+            item['video']['video_id']: item['video']['playback_progress']
+            for item in resp.json()['items']
+        }
+        self.assertEqual(response_progress['v_qref1'], 25)
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_removes_consumed_item_when_receiver_advances(self, MockYTService):
+        self.v2.duration_seconds = 200
+        self.v2.save(update_fields=['duration_seconds'])
+        mock_yt = MagicMock()
+        mock_yt.get_now_playing.return_value = {
+            'video_id': 'v_qref2',
+            'state': '1',
+            'current_time': '20',
+        }
+        mock_yt.fetch_channel_video_progress.return_value = {}
+        MockYTService.return_value = mock_yt
+
+        with (
+            patch('subscriptions.views.os.path.exists', return_value=True),
+            patch('builtins.open', mock_open(read_data='{"screen_id": "screen-id"}')),
+        ):
+            resp = self.client.post('/api/queue/refresh-progress/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['removed_count'], 1)
+        self.assertEqual(resp.json()['removed_video_ids'], ['v_qref1'])
+        self.assertFalse(QueueItem.objects.filter(pk=self.qi1.pk).exists())
+        self.v1.refresh_from_db()
+        self.assertEqual(self.v1.playback_progress, 100)
+        self.assertTrue(self.v1.watched_locally)
+        self.assertEqual(
+            [item['video']['video_id'] for item in resp.json()['items']],
+            ['v_qref2'],
+        )
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_removes_current_item_when_receiver_reports_ended(self, MockYTService):
+        mock_yt = MagicMock()
+        mock_yt.get_now_playing.return_value = {
+            'video_id': 'v_qref1',
+            'state': '0',
+            'current_time': '200',
+        }
+        mock_yt.fetch_channel_video_progress.return_value = {}
+        MockYTService.return_value = mock_yt
+
+        with (
+            patch('subscriptions.views.os.path.exists', return_value=True),
+            patch('builtins.open', mock_open(read_data='{"screen_id": "screen-id"}')),
+        ):
+            resp = self.client.post('/api/queue/refresh-progress/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['removed_count'], 1)
+        self.assertEqual(resp.json()['removed_video_ids'], ['v_qref1'])
+        self.assertFalse(QueueItem.objects.filter(pk=self.qi1.pk).exists())
+
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_repairs_consumed_video_after_queue_row_was_already_removed(self, MockYTService):
+        self.qi1.delete()
+        mock_yt = MagicMock()
+        mock_yt.get_now_playing.return_value = {
+            'video_id': 'v_qref2',
+            'video_ids': ['v_qref1', 'v_qref2'],
+            'state': '1',
+            'current_time': '20',
+        }
+        mock_yt.fetch_channel_video_progress.return_value = {}
+        MockYTService.return_value = mock_yt
+
+        with (
+            patch('subscriptions.views.os.path.exists', return_value=True),
+            patch('builtins.open', mock_open(read_data='{"screen_id": "screen-id"}')),
+        ):
+            resp = self.client.post('/api/queue/refresh-progress/')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['removed_count'], 0)
+        self.assertEqual(resp.json()['removed_video_ids'], ['v_qref1'])
+        self.v1.refresh_from_db()
+        self.assertEqual(self.v1.playback_progress, 100)
+        self.assertTrue(self.v1.watched_locally)

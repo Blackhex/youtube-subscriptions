@@ -65,9 +65,11 @@ frontend/
 │   │   ├── seed.ts                 # DB seeding via API calls
 │   │   └── pockettube-sample.json  # Sample PocketTube import file
 │   ├── helpers/
-│   │   └── api-mock.ts            # Route interception helpers
+│   │   ├── api-mock.ts            # Route interception helpers
+│   │   └── drag.ts                # @dnd-kit pointer-drag helper
 │   ├── subscriptions.spec.ts      # Scenarios 2, 3, 9, 10, 11, 12, 14
 │   ├── feeds.spec.ts              # Scenarios 4, 7, 13
+│   ├── feeds-reorder.spec.ts      # Feed column drag/keyboard reorder + append-on-create
 │   ├── queue.spec.ts              # Scenario 5 (minus Cast hardware)
 │   ├── playlists.spec.ts          # Scenario 6
 │   ├── sync.spec.ts               # Scenarios 1, 8
@@ -289,18 +291,70 @@ test('resizes sidebar via drag and persists to localStorage', async ({ page }) =
 ```
 
 ## Drag-and-Drop Testing with @dnd-kit
-@dnd-kit uses pointer events. Use Playwright's mouse API:
+`locator.dragTo()` does **not** work with @dnd-kit's `PointerSensor`. Use the manual mouse
+sequence in `e2e/helpers/drag.ts` (verified against feed column reordering):
+
 ```typescript
-async function dragAndDrop(page: Page, source: Locator, target: Locator) {
-  const sourceBox = await source.boundingBox();
-  const targetBox = await target.boundingBox();
-  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
+export async function dndKitDrag(page: Page, handle: Locator, target: Locator) {
+  const from = await handle.boundingBox();
+  const to = await target.boundingBox();
+  const startX = from!.x + from!.width / 2;
+  const startY = from!.y + from!.height / 2;
+  const endX = to!.x + to!.width / 2;
+  const endY = to!.y + to!.height / 2;
+
+  await page.mouse.move(startX, startY);
   await page.mouse.down();
-  // Move in steps to trigger @dnd-kit sensors
-  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 10 });
+  // Several small discrete moves are required: one big jump gets coalesced and the
+  // `activationConstraint: { distance: 5 }` never fires.
+  const direction = Math.sign(endX - startX) || 1;
+  for (const dx of [3, 8, 16, 32]) {
+    await page.mouse.move(startX + dx * direction, startY);
+    await page.waitForTimeout(20);
+  }
+  await page.mouse.move(endX, endY, { steps: 15 });
+  await page.waitForTimeout(100);
+  await page.mouse.move(endX, endY); // settle so collision detection registers `over`
+  await page.waitForTimeout(100);
   await page.mouse.up();
 }
 ```
+
+Rules that made these drags reliable:
+- Grab the **drag activator** (e.g. `.feed-title-handle`), not the whole `.column`.
+- Never assert order synchronously after `mouse.up()` — use `expect.poll(() => names(page))`
+  because the optimistic state update and the persistence POST land on later frames.
+- A wide viewport (`1600x900`) keeps source and target columns on screen; `.column` is
+  `clamp(300px, 30vw, 500px)` wide, so ~3 columns fit before horizontal scrolling starts.
+
+### Keyboard sorting (accessible alternative, no mouse needed)
+`KeyboardSensor` + `sortableKeyboardCoordinates` is far more stable than pointer drags:
+```typescript
+await handle.focus();
+await page.keyboard.press('Space');       // pick up
+await page.waitForTimeout(150);
+await page.keyboard.press('ArrowRight');  // move (ArrowDown for vertical lists)
+await page.waitForTimeout(150);
+await page.keyboard.press('Space');       // drop  (Escape cancels, no API call)
+```
+The short waits matter — dnd-kit processes each key in its own animation frame.
+
+### Asserting the persistence call
+Collect requests on the page rather than using `waitForRequest`, so "no call was made"
+(the Escape-cancel case) is assertable too:
+```typescript
+const calls: number[][] = [];
+page.on('request', (req) => {
+  if (req.method() === 'POST' && new URL(req.url()).pathname.endsWith('/api/feeds/reorder/')) {
+    calls.push(req.postDataJSON().ordered_ids);
+  }
+});
+```
+
+### Isolation when tests mutate real dev data
+Sortable specs run against the dev database. Capture the original order in `beforeEach`
+via the API, and in `afterEach` delete anything the test created (diff against the captured
+ids) and `POST .../reorder/` the original id list back. This keeps repeated runs green.
 
 ## Running Tests
 ```bash

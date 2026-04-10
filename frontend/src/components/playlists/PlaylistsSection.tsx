@@ -36,10 +36,7 @@ export default function PlaylistsSection({ confirm }: PlaylistsSectionProps) {
   }, [playlists]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCast = useCallback(async (playlistId: string) => {
-    let screenId = sessionStorage.getItem('castScreenId');
-    if (!screenId) {
-      screenId = await requestCastSession();
-    }
+    const screenId = await requestCastSession();
     if (screenId) {
       await castPlaylist(playlistId, screenId);
     }

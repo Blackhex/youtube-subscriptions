@@ -2,8 +2,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
-import uuid
+from urllib.parse import urlparse
 
 import requests as http_requests
 from google.auth.transport.requests import Request
@@ -14,44 +15,28 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
+_oauth_state = {
+    'in_progress': False,
+    'auth_url': None,
+    'error': None,
+}
+_oauth_lock = threading.Lock()
 
-class YouTubeService:
-    SCOPES = ['https://www.googleapis.com/auth/youtube']
-    CLIENT_SECRETS_FILE = 'client_secret.json'
-    TOKEN_FILE = 'token.json'
+# ═════════════════════════════════════════════════════════════════════════════
+# Class 1: YouTube Data API v3
+# ═════════════════════════════════════════════════════════════════════════════
 
-    def __init__(self):
-        self.credentials = self._get_credentials()
-        self.youtube = build('youtube', 'v3', credentials=self.credentials)
+class YouTubePublicAPI:
+    """YouTube Data API v3 client using OAuth credentials."""
+
+    def __init__(self, credentials):
+        self.credentials = credentials
+        self.youtube = build('youtube', 'v3', credentials=credentials)
 
     @classmethod
     def from_credentials(cls, credentials):
         """Factory: create instance from existing credentials."""
-        instance = cls.__new__(cls)
-        instance.credentials = credentials
-        instance.youtube = build('youtube', 'v3', credentials=credentials)
-        return instance
-
-    def _get_credentials(self) -> Credentials:
-        """Load or obtain OAuth credentials."""
-        creds = None
-        if os.path.exists(self.TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(self.TOKEN_FILE, self.SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                except Exception:
-                    os.remove(self.TOKEN_FILE)
-                    creds = None
-            if not creds:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    self.CLIENT_SECRETS_FILE, self.SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-            with open(self.TOKEN_FILE, 'w') as f:
-                f.write(creds.to_json())
-        return creds
+        return cls(credentials)
 
     # ── Retry Logic ──────────────────────────────────────────────────────
 
@@ -196,8 +181,10 @@ class YouTubeService:
                 duration_seconds = self._parse_iso8601_duration(content.get('duration'))
                 live_broadcast = snippet.get('liveBroadcastContent', 'none')
 
-                if live_broadcast in ('live', 'upcoming'):
+                if live_broadcast == 'live':
                     video_type = 'live'
+                elif live_broadcast == 'upcoming':
+                    video_type = 'upcoming'
                 elif duration_seconds is not None and duration_seconds <= 60:
                     video_type = 'short'
                 else:
@@ -350,7 +337,13 @@ class YouTubeService:
         seconds = int(match.group(3) or 0)
         return hours * 3600 + minutes * 60 + seconds
 
-    # ── InnerTube API Methods ────────────────────────────────────────────
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Class 2: YouTube InnerTube + Lounge API
+# ═════════════════════════════════════════════════════════════════════════════
+
+class YouTubeInnerTubeAPI:
+    """InnerTube API client using OAuth bearer token with TVHTML5 client context."""
 
     _INNERTUBE_URL = 'https://www.youtube.com/youtubei/v1/browse'
     _INNERTUBE_CONTEXT = {
@@ -359,6 +352,22 @@ class YouTubeService:
             'clientVersion': '7.20250101',
         }
     }
+    # ── Lounge API constants ─────────────────────────────────────────────
+    _LOUNGE_TOKEN_URL = 'https://www.youtube.com/api/lounge/pairing/get_lounge_token_batch'
+    _LOUNGE_BIND_URL = 'https://www.youtube.com/api/lounge/bc/bind'
+    _LOUNGE_SESSION_FILE = 'media/lounge_session.json'
+
+    def __init__(self, credentials):
+        self.credentials = credentials
+
+    def _innertube_headers(self) -> dict:
+        """Return standard InnerTube request headers with OAuth bearer token."""
+        return {
+            'Authorization': f'Bearer {self.credentials.token}',
+            'Content-Type': 'application/json',
+        }
+
+    # ── InnerTube API Methods ────────────────────────────────────────────
 
     def fetch_innertube_subscriptions(self) -> list[dict]:
         """Fetch subscriptions via InnerTube FEchannels endpoint."""
@@ -366,10 +375,7 @@ class YouTubeService:
             'browseId': 'FEchannels',
             'context': self._INNERTUBE_CONTEXT,
         }
-        headers = {
-            'Authorization': f'Bearer {self.credentials.token}',
-            'Content-Type': 'application/json',
-        }
+        headers = self._innertube_headers()
 
         try:
             resp = http_requests.post(self._INNERTUBE_URL, json=body, headers=headers, timeout=30)
@@ -422,86 +428,60 @@ class YouTubeService:
         logger.info("Fetched %d channels from InnerTube FEchannels", len(channels))
         return channels
 
-    def fetch_watch_history(self) -> dict[str, int]:
-        """Fetch watch history via InnerTube FEhistory. Returns {video_id: progress_percent}."""
+    def fetch_channel_video_progress(self, channel_id: str) -> dict[str, int]:
+        """Fetch watch progress for videos on a channel via InnerTube channel browse.
+
+        Returns {video_id: percent_watched} for videos with any watch progress.
+        Uses the TVHTML5 client's channel Videos tab, which includes
+        thumbnailOverlayResumePlaybackRenderer with percentDurationWatched.
+        """
         body = {
-            'browseId': 'FEhistory',
+            'browseId': channel_id,
+            'params': 'EgZ2aWRlb3PyBgQKAjoA',  # Videos tab
             'context': self._INNERTUBE_CONTEXT,
         }
-        headers = {
-            'Authorization': f'Bearer {self.credentials.token}',
-            'Content-Type': 'application/json',
-        }
+        headers = self._innertube_headers()
 
         try:
             resp = http_requests.post(self._INNERTUBE_URL, json=body, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
         except Exception:
-            logger.exception("InnerTube FEhistory request failed")
+            logger.exception("InnerTube channel browse failed for %s", channel_id)
             return {}
 
         progress_map: dict[str, int] = {}
         try:
-            tabs = data.get('contents', {}).get('twoColumnBrowseResultsRenderer', {}).get('tabs', [])
-            if not tabs:
-                tabs = data.get('contents', {}).get('tvBrowseRenderer', {}).get('content', {}).get('tvSurfaceContentRenderer', {}).get('content', {}).get('sectionListRenderer', {}).get('contents', [])
-
-            for tab in tabs:
-                sections = tab.get('tabRenderer', {}).get('content', {}).get('sectionListRenderer', {}).get('contents', [])
-                if not sections:
-                    sections = [tab]
-
-                for section in sections:
-                    items = section.get('itemSectionRenderer', {}).get('contents', [])
-                    if not items:
-                        items = section.get('shelfRenderer', {}).get('content', {}).get('horizontalListRenderer', {}).get('items', [])
-
-                    for item in items:
-                        renderer = (
-                            item.get('videoRenderer', {})
-                            or item.get('tileRenderer', {})
-                            or item.get('gridVideoRenderer', {})
-                        )
-                        if not renderer:
-                            continue
-
-                        video_id = renderer.get('videoId') or renderer.get('contentId')
-                        if not video_id:
-                            continue
-
-                        # Look for progress in overlay/thumbnail overlays
-                        progress = 0
-                        overlays = renderer.get('thumbnailOverlays', [])
-                        for overlay in overlays:
-                            progress_renderer = overlay.get('thumbnailOverlayResumePlaybackRenderer', {})
-                            pct = progress_renderer.get('percentDurationWatched', 0)
-                            if pct:
-                                progress = int(pct)
-                                break
-
-                        # Also check tile overlays
-                        if not progress:
-                            tile_overlays = renderer.get('metadata', {}).get('tileMetadataRenderer', {}).get('overlays', [])
-                            for overlay in tile_overlays:
-                                pct = overlay.get('percentDurationWatched', 0)
-                                if pct:
-                                    progress = int(pct)
-                                    break
-
-                        if video_id:
-                            progress_map[video_id] = progress
+            self._extract_tile_progress(data, progress_map)
         except Exception:
-            logger.exception("Failed to parse InnerTube FEhistory response")
+            logger.exception("Failed to parse channel browse for %s", channel_id)
 
-        logger.info("Fetched watch progress for %d videos from InnerTube", len(progress_map))
         return progress_map
 
-    # ── Lounge API Methods ───────────────────────────────────────────────
+    @staticmethod
+    def _extract_tile_progress(obj, progress_map: dict[str, int]):
+        """Recursively extract video progress from tileRenderer elements."""
+        if isinstance(obj, dict):
+            if 'tileRenderer' in obj:
+                tile = obj['tileRenderer']
+                video_id = tile.get('contentId')
+                if video_id:
+                    overlays = (tile.get('header', {})
+                                .get('tileHeaderRenderer', {})
+                                .get('thumbnailOverlays', []))
+                    for overlay in overlays:
+                        pct = (overlay.get('thumbnailOverlayResumePlaybackRenderer', {})
+                               .get('percentDurationWatched', 0))
+                        if pct:
+                            progress_map[video_id] = int(pct)
+                            break
+            for value in obj.values():
+                YouTubeInnerTubeAPI._extract_tile_progress(value, progress_map)
+        elif isinstance(obj, list):
+            for item in obj:
+                YouTubeInnerTubeAPI._extract_tile_progress(item, progress_map)
 
-    _LOUNGE_TOKEN_URL = 'https://www.youtube.com/api/lounge/pairing/get_lounge_token_batch'
-    _LOUNGE_BIND_URL = 'https://www.youtube.com/api/lounge/bc/bind'
-    _LOUNGE_SESSION_FILE = 'media/lounge_session.json'
+    # ── Lounge API Methods ───────────────────────────────────────────────
 
     def get_lounge_token(self, screen_id: str) -> str:
         """Get a lounge token for the given screen ID."""
@@ -528,101 +508,21 @@ class YouTubeService:
         lounge_session: dict | None = None,
     ) -> dict:
         """Cast videos to a receiver device via the Lounge API."""
-        token = self.get_lounge_token(screen_id)
-        device_id = str(uuid.uuid4())
+        if not video_ids:
+            raise ValueError("At least one video is required for Cast")
 
-        # Bind session
-        bind_params = {
-            'device': 'LOUNGE_SCREEN',
-            'id': device_id,
-            'loungeIdToken': token,
-            'VER': '8',
-            'RID': '1',
-            'CVER': '1',
-        }
-        resp = http_requests.post(
-            self._LOUNGE_BIND_URL,
-            params=bind_params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-
-        # Parse SID and gsessionid from response
-        sid = None
-        gsession_id = None
-        for line in resp.text.splitlines():
-            line = line.strip()
-            if '"S"' in line or '"sid"' in line.lower():
-                # Try JSON parse for structured lines
-                pass
-            if '"c"' in line:
-                try:
-                    parsed = json.loads('[' + line.rstrip(',') + ']')
-                    if isinstance(parsed, list):
-                        for entry in parsed:
-                            if isinstance(entry, list) and len(entry) >= 2:
-                                if entry[0] == 'c':
-                                    sid = entry[1]
-                                elif entry[0] == 'S':
-                                    gsession_id = entry[1]
-                except (json.JSONDecodeError, IndexError):
-                    pass
-
-        # Fallback: try to parse entire response body
-        if not sid:
-            try:
-                lines = resp.text.strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if not line or line.isdigit():
-                        continue
-                    try:
-                        data = json.loads(line)
-                        if isinstance(data, list):
-                            for entry in data:
-                                if isinstance(entry, list) and len(entry) >= 2:
-                                    for sub in entry[1:]:
-                                        if isinstance(sub, list) and len(sub) >= 2:
-                                            if sub[0] == 'c':
-                                                sid = sub[1]
-                                            elif sub[0] == 'S':
-                                                gsession_id = sub[1]
-                    except json.JSONDecodeError:
-                        continue
-            except Exception:
-                logger.warning("Could not parse SID/gsessionid from bind response")
-
-        # Set playlist
-        set_params = {
-            'device': 'LOUNGE_SCREEN',
-            'id': device_id,
-            'loungeIdToken': token,
-            'SID': sid or '',
-            'gsessionid': gsession_id or '',
-            'VER': '8',
-            'RID': '2',
-        }
-        set_data = {
-            'count': '1',
-            'ofs': '0',
-            'req0__sc': 'setPlaylist',
-            'req0_videoIds': ','.join(video_ids),
-        }
-        resp = http_requests.post(
-            self._LOUNGE_BIND_URL,
-            params=set_params,
-            data=set_data,
-            timeout=15,
-        )
-        resp.raise_for_status()
+        session = self._create_youtube_session(screen_id)
+        session.play_video(video_ids[0])
+        for video_id in video_ids[1:]:
+            session.add_to_queue(video_id)
         logger.info("Cast %d videos to screen %s", len(video_ids), screen_id)
 
         session_data = {
             'screen_id': screen_id,
-            'device_id': device_id,
-            'lounge_token': token,
-            'sid': sid,
-            'gsession_id': gsession_id,
+            'lounge_token': session._lounge_token,
+            'sid': session._sid,
+            'gsession_id': session._gsession_id,
+            'video_ids': video_ids,
         }
 
         # Save session
@@ -632,62 +532,542 @@ class YouTubeService:
 
         return session_data
 
+    @staticmethod
+    def _create_youtube_session(screen_id: str):
+        from pychromecast.controllers.youtube import TimeoutYouTubeSession
+        return TimeoutYouTubeSession(screen_id=screen_id, timeout=15)
+
     def get_now_playing(self, lounge_session: dict) -> dict | None:
         """Get the current playback state from a lounge session."""
-        params = {
-            'device': 'LOUNGE_SCREEN',
-            'id': lounge_session.get('device_id', ''),
-            'loungeIdToken': lounge_session.get('lounge_token', ''),
-            'SID': lounge_session.get('sid', ''),
-            'gsessionid': lounge_session.get('gsession_id', ''),
-            'VER': '8',
-            'RID': 'rpc',
-            'CI': '0',
-            'TYPE': 'xmlhttp',
-        }
-
         try:
-            resp = http_requests.get(
-                self._LOUNGE_BIND_URL,
-                params=params,
-                timeout=15,
+            session = self._create_youtube_session(lounge_session.get('screen_id', ''))
+            session._lounge_token = lounge_session.get('lounge_token')
+            session._sid = lounge_session.get('sid')
+            session._gsession_id = lounge_session.get('gsession_id')
+            try:
+                events = session.get_session_data()
+            except http_requests.HTTPError as error:
+                if error.response is None or error.response.status_code not in (400, 404):
+                    raise
+                events = session.get_session_data()
+
+            refreshed = {
+                'screen_id': lounge_session.get('screen_id'),
+                'lounge_token': session._lounge_token,
+                'sid': session._sid,
+                'gsession_id': session._gsession_id,
+            }
+            session_changed = all(refreshed.values()) and any(
+                lounge_session.get(key) != value
+                for key, value in refreshed.items()
             )
-            resp.raise_for_status()
+            if session_changed:
+                lounge_session.update(refreshed)
         except Exception:
             logger.exception("Failed to get now playing from lounge")
             return None
 
-        # Parse the response for now playing info
-        try:
-            lines = resp.text.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line or line.isdigit():
-                    continue
-                try:
-                    data = json.loads(line)
-                    if isinstance(data, list):
-                        for entry in data:
-                            if isinstance(entry, list) and len(entry) >= 2:
-                                for sub in entry[1:]:
-                                    if isinstance(sub, list) and len(sub) >= 2:
-                                        if sub[0] == 'nowPlaying':
-                                            info = sub[1] if len(sub) > 1 else {}
-                                            return {
-                                                'video_id': info.get('videoId'),
-                                                'state': info.get('state'),
-                                                'current_time': info.get('currentTime'),
-                                            }
-                                        if sub[0] == 'onStateChange':
-                                            info = sub[1] if len(sub) > 1 else {}
-                                            return {
-                                                'video_id': info.get('videoId'),
-                                                'state': info.get('state'),
-                                                'current_time': info.get('currentTime'),
-                                            }
-                except json.JSONDecodeError:
-                    continue
-        except Exception:
-            logger.exception("Failed to parse now playing response")
+        playback = {
+            'video_id': None,
+            'state': None,
+            'current_time': None,
+            'video_ids': lounge_session.get('video_ids'),
+        }
+        for event in events:
+            if not isinstance(event, list) or len(event) < 2:
+                continue
+            if event[0] in ('nowPlaying', 'onStateChange'):
+                info = event[1] if isinstance(event[1], dict) else {}
+                if info.get('videoId'):
+                    playback['video_id'] = info['videoId']
+                if info.get('state') is not None:
+                    playback['state'] = info['state']
+                if info.get('currentTime') is not None:
+                    playback['current_time'] = info['currentTime']
+                if info.get('mdxExpandedReceiverVideoIdList'):
+                    playback['video_ids'] = [
+                        video_id
+                        for video_id in info['mdxExpandedReceiverVideoIdList'].split(',')
+                        if video_id
+                    ]
 
-        return None
+        if playback['video_id']:
+            if playback.get('video_ids'):
+                lounge_session['video_ids'] = playback['video_ids']
+            playback = self._estimate_lounge_progress(
+                lounge_session,
+                playback,
+                time.time(),
+            )
+            session_changed = True
+
+        if session_changed:
+            try:
+                os.makedirs(os.path.dirname(self._LOUNGE_SESSION_FILE), exist_ok=True)
+                with open(self._LOUNGE_SESSION_FILE, 'w') as session_file:
+                    json.dump(lounge_session, session_file)
+            except OSError:
+                logger.warning("Failed to persist refreshed Lounge session")
+
+        return playback if playback['video_id'] else None
+
+    @staticmethod
+    def _estimate_lounge_progress(lounge_session, playback, observed_at):
+        try:
+            reported_time = float(playback.get('current_time') or 0)
+        except (TypeError, ValueError):
+            reported_time = 0
+
+        estimated_time = reported_time
+        previous = lounge_session.get('playback')
+        if (
+            isinstance(previous, dict)
+            and previous.get('video_id') == playback.get('video_id')
+            and previous.get('state') == '1'
+            and playback.get('state') == '1'
+        ):
+            try:
+                same_reported_position = abs(
+                    reported_time - float(previous.get('reported_time', 0))
+                ) < 0.5
+                elapsed = max(0, observed_at - float(previous.get('observed_at', observed_at)))
+                if same_reported_position:
+                    estimated_time = max(
+                        reported_time,
+                        float(previous.get('current_time', 0)) + elapsed,
+                    )
+            except (TypeError, ValueError):
+                pass
+
+        lounge_session['playback'] = {
+            'video_id': playback.get('video_id'),
+            'state': playback.get('state'),
+            'reported_time': reported_time,
+            'current_time': estimated_time,
+            'observed_at': observed_at,
+        }
+        return {
+            **playback,
+            'current_time': estimated_time,
+        }
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Class 3: YouTube Cookie-based API
+# ═════════════════════════════════════════════════════════════════════════════
+
+class YouTubeCookieAPI:
+    """Cookie-based YouTube API client using Playwright headless browser.
+
+    Uses a persistent Playwright browser state for one-time interactive login,
+    then uses headless Playwright for operations requiring browser-session auth.
+    """
+
+    _STATE_FILE = os.path.join('media', 'browser_state.json')
+
+    def __init__(self):
+        self._has_state = os.path.exists(self._STATE_FILE)
+        if not self._has_state:
+            logger.info("No YouTube session found. Install the browser extension to enable mark-as-watched.")
+
+    @classmethod
+    def _new_context(cls, browser, storage_state=None):
+        """Create browser context with anti-detection init script."""
+        context = browser.new_context(storage_state=storage_state)
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false})")
+        return context
+
+    @classmethod
+    def get_login_state(cls):
+        """Return current session status."""
+        return {
+            'authenticated': os.path.exists(cls._STATE_FILE),
+        }
+
+    @classmethod
+    def logout(cls):
+        """Delete the saved browser state."""
+        if os.path.exists(cls._STATE_FILE):
+            os.remove(cls._STATE_FILE)
+            logger.info("YouTube session deleted")
+
+    def _refresh_session(self) -> bool:
+        """Try to refresh YouTube session cookies by visiting youtube.com headlessly."""
+        if not os.path.exists(self._STATE_FILE):
+            return False
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = self._new_context(browser, storage_state=self._STATE_FILE)
+                page = context.new_page()
+                page.goto('https://www.youtube.com', wait_until='domcontentloaded')
+                # Check if we still have SAPISID
+                cookies = context.cookies('https://www.youtube.com')
+                sapisid = next(
+                    (c for c in cookies if c['name'] in ('SAPISID', '__Secure-3PAPISID')),
+                    None,
+                )
+                if sapisid:
+                    state = context.storage_state()
+                    with open(self._STATE_FILE, 'w') as f:
+                        json.dump(state, f)
+                    logger.info("YouTube session refreshed successfully")
+                    context.close()
+                    browser.close()
+                    return True
+                else:
+                    logger.warning("Session refresh failed — SAPISID missing, re-login required")
+                    context.close()
+                    browser.close()
+                    return False
+        except Exception:
+            logger.exception("Failed to refresh YouTube session")
+            return False
+
+    def report_watch(self, video_id: str, _retried: bool = False) -> bool:
+        """Mark a video as fully watched using Playwright headless browser."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            logger.warning("Invalid video_id format: %s", video_id)
+            return False
+
+        if not self._has_state:
+            # Re-check in case login happened after init
+            self._has_state = os.path.exists(self._STATE_FILE)
+            if not self._has_state:
+                logger.warning("No browser state for report_watch — install the browser extension")
+                return False
+
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = self._new_context(browser, storage_state=self._STATE_FILE)
+                page = context.new_page()
+
+                # Navigate to the watch page
+                page.goto(f'https://www.youtube.com/watch?v={video_id}', wait_until='domcontentloaded')
+
+                # Extract tracking URL and send ping from browser context
+                result = page.evaluate('''() => {
+                    try {
+                        // Get the tracking URL from ytInitialPlayerResponse
+                        const playerResponse = window.ytInitialPlayerResponse
+                            || (typeof ytInitialPlayerResponse !== 'undefined' ? ytInitialPlayerResponse : null);
+                        if (!playerResponse) return { error: 'No ytInitialPlayerResponse' };
+
+                        const tracking = playerResponse.playbackTracking;
+                        if (!tracking) return { error: 'No playbackTracking' };
+
+                        const baseUrl = tracking.videostatsPlaybackUrl?.baseUrl;
+                        if (!baseUrl) return { error: 'No videostatsPlaybackUrl' };
+
+                        // Generate CPN
+                        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+                        let cpn = '';
+                        const values = crypto.getRandomValues(new Uint8Array(16));
+                        for (const v of values) cpn += chars[v % chars.length];
+
+                        // Build the stats URL: rewrite s.youtube.com to www.youtube.com
+                        let statsUrl = baseUrl.replace(/^https:\\/\\/s\\.youtube\\.com\\//, 'https://www.youtube.com/');
+
+                        // Parse and rebuild URL
+                        const url = new URL(statsUrl);
+                        url.searchParams.delete('len');
+                        url.searchParams.set('cpn', cpn);
+                        url.searchParams.set('ver', '2');
+                        url.searchParams.set('final', '1');
+
+                        return { statsUrl: url.toString() };
+                    } catch (e) {
+                        return { error: e.message };
+                    }
+                }''')
+
+                if 'error' in result:
+                    logger.warning("Failed to extract tracking URL for %s: %s", video_id, result['error'])
+                    context.close()
+                    browser.close()
+                    # Try session refresh on first failure
+                    if not _retried and self._refresh_session():
+                        return self.report_watch(video_id, _retried=True)
+                    return False
+
+                stats_url = result['statsUrl']
+
+                # Validate domain
+                parsed = urlparse(stats_url)
+                if parsed.scheme != 'https' or not (parsed.hostname or '').endswith(('.youtube.com', '.google.com')):
+                    logger.warning("Unexpected tracking URL domain for %s: %s", video_id, stats_url)
+                    context.close()
+                    browser.close()
+                    return False
+
+                # Send the tracking ping from within the browser context
+                # This ensures cookies are sent properly (same-origin)
+                status = page.evaluate('''async (url) => {
+                    try {
+                        const resp = await fetch(url, { credentials: 'include' });
+                        return resp.status;
+                    } catch (e) {
+                        return -1;
+                    }
+                }''', stats_url)
+
+                # Save refreshed cookies from the page visit
+                state = context.storage_state()
+                with open(self._STATE_FILE, 'w') as f:
+                    json.dump(state, f)
+
+                context.close()
+                browser.close()
+
+                if status not in (200, 204):
+                    logger.warning("Tracking ping failed for %s: status %d", video_id, status)
+                    if not _retried and self._refresh_session():
+                        return self.report_watch(video_id, _retried=True)
+                    return False
+
+                logger.info("Playwright report_watch for %s: status %d", video_id, status)
+                return True
+
+        except Exception:
+            logger.exception("Failed to report watch (Playwright) for video %s", video_id)
+            return False
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Class 4: Facade
+# ═════════════════════════════════════════════════════════════════════════════
+
+class YouTubeService:
+    """Facade that delegates to YouTubePublicAPI, YouTubeInnerTubeAPI, and YouTubeCookieAPI."""
+
+    SCOPES = ['https://www.googleapis.com/auth/youtube']
+    CLIENT_SECRETS_FILE = 'client_secret.json'
+    TOKEN_FILE = 'token.json'
+
+    def __init__(self):
+        self.credentials = self._get_credentials()
+        self.public = YouTubePublicAPI(self.credentials)
+        self.innertube = YouTubeInnerTubeAPI(self.credentials)
+        self._cookie = None
+        # Backward compatibility: expose the googleapiclient service object
+        self.youtube = self.public.youtube
+
+    @classmethod
+    def from_credentials(cls, credentials):
+        """Factory: create instance from existing credentials."""
+        instance = cls.__new__(cls)
+        instance.credentials = credentials
+        instance.public = YouTubePublicAPI(credentials)
+        instance.innertube = YouTubeInnerTubeAPI(credentials)
+        instance._cookie = None
+        instance.youtube = instance.public.youtube
+        return instance
+
+    @property
+    def cookie(self):
+        if self._cookie is None:
+            self._cookie = YouTubeCookieAPI()
+        return self._cookie
+
+    @cookie.setter
+    def cookie(self, value):
+        self._cookie = value
+
+    @classmethod
+    def get_oauth_state(cls):
+        """Return current OAuth status."""
+        return {
+            'authenticated': os.path.exists(cls.TOKEN_FILE),
+            'in_progress': _oauth_state['in_progress'],
+            'auth_url': _oauth_state['auth_url'],
+            'error': _oauth_state['error'],
+        }
+
+    @classmethod
+    def start_oauth(cls):
+        """Start OAuth flow in a background thread.
+
+        Generates the auth URL and starts the callback listener on port 8085.
+        Returns the auth URL for the frontend to open in a new tab.
+        Does NOT open a browser on the server.
+        """
+        with _oauth_lock:
+            if _oauth_state['in_progress']:
+                return _oauth_state['auth_url']
+            _oauth_state['in_progress'] = True
+            _oauth_state['error'] = None
+            _oauth_state['auth_url'] = None
+
+        def _run():
+            try:
+                import http.server
+
+                # Allow http://localhost for OAuth callback (safe for local dev)
+                os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    cls.CLIENT_SECRETS_FILE, cls.SCOPES
+                )
+                flow.redirect_uri = 'http://localhost:8085/'
+                auth_url, _ = flow.authorization_url(prompt='consent')
+                _oauth_state['auth_url'] = auth_url
+
+                # Custom callback handler — uses the SAME flow object
+                # so the state parameter matches
+                class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        logger.info("OAuth callback received: %s", self.path)
+                        self.send_response(200)
+                        self.send_header('Content-type', 'text/html')
+                        self.end_headers()
+                        self.wfile.write(
+                            b'<html><body><h1>Sign-in complete!</h1>'
+                            b'<p>You can close this tab.</p></body></html>'
+                        )
+                        # Only capture if this is the actual OAuth callback (has ?code= or ?error=)
+                        if 'code=' in self.path or 'error=' in self.path:
+                            self.server.callback_url = f'http://localhost:8085{self.path}'
+
+                    def log_message(self, format, *args):
+                        pass  # Suppress default request logs
+
+                server = http.server.HTTPServer(('', 8085), _CallbackHandler)
+                server.socket.setsockopt(
+                    __import__('socket').SOL_SOCKET,
+                    __import__('socket').SO_REUSEADDR, 1,
+                )
+                server.timeout = 300  # 5 minute timeout
+                server.callback_url = None
+
+                # Handle requests until we get the OAuth callback
+                import time as _time
+                deadline = _time.time() + 300
+                while server.callback_url is None and _time.time() < deadline:
+                    server.timeout = max(1, deadline - _time.time())
+                    server.handle_request()
+
+                if not server.callback_url:
+                    _oauth_state['error'] = 'OAuth callback timed out (5 minutes)'
+                    return
+
+                flow.fetch_token(authorization_response=server.callback_url)
+                creds = flow.credentials
+                with open(cls.TOKEN_FILE, 'w') as f:
+                    f.write(creds.to_json())
+                logger.info("OAuth credentials saved successfully")
+            except Exception as e:
+                logger.exception("OAuth flow failed")
+                _oauth_state['error'] = str(e)
+            finally:
+                with _oauth_lock:
+                    _oauth_state['in_progress'] = False
+                    _oauth_state['auth_url'] = None
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        # Wait briefly for the auth URL to be generated
+        for _ in range(50):  # 5 seconds max
+            if _oauth_state['auth_url']:
+                return _oauth_state['auth_url']
+            time.sleep(0.1)
+        return _oauth_state['auth_url']
+
+    def _get_credentials(self) -> Credentials:
+        """Load or obtain OAuth credentials."""
+        creds = None
+        if os.path.exists(self.TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(self.TOKEN_FILE, self.SCOPES)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception:
+                    os.remove(self.TOKEN_FILE)
+                    creds = None
+            if not creds:
+                if not os.path.exists(self.CLIENT_SECRETS_FILE):
+                    raise FileNotFoundError(
+                        f"OAuth client secrets file '{self.CLIENT_SECRETS_FILE}' not found. "
+                        "Download it from Google Cloud Console."
+                    )
+                # Auto-start OAuth flow if not already in progress
+                if not _oauth_state['in_progress']:
+                    self.start_oauth()
+                raise PermissionError(
+                    "YouTube OAuth credentials not available. "
+                    "Please sign in via the Google account icon in the app."
+                )
+            with open(self.TOKEN_FILE, 'w') as f:
+                f.write(creds.to_json())
+        return creds
+
+    # ── Retry logic (kept on facade for backward compat) ─────────────────
+
+    def _execute_with_retry(self, request, max_retries: int = 3):
+        return self.public._execute_with_retry(request, max_retries)
+
+    # ── Public API delegates ─────────────────────────────────────────────
+
+    def fetch_subscriptions(self) -> list[dict]:
+        return self.public.fetch_subscriptions()
+
+    def fetch_channel_details(self, channel_ids):
+        return self.public.fetch_channel_details(channel_ids)
+
+    def fetch_uploads(self, playlist_id, max_results=50, published_after=None):
+        return self.public.fetch_uploads(playlist_id, max_results, published_after)
+
+    def fetch_video_details(self, video_ids):
+        return self.public.fetch_video_details(video_ids)
+
+    def fetch_playlists(self):
+        return self.public.fetch_playlists()
+
+    def fetch_playlist_items(self, playlist_id, max_results=50, page_token=None):
+        return self.public.fetch_playlist_items(playlist_id, max_results, page_token)
+
+    def add_to_playlist(self, playlist_id, video_id):
+        return self.public.add_to_playlist(playlist_id, video_id)
+
+    def remove_from_playlist(self, playlist_item_id):
+        return self.public.remove_from_playlist(playlist_item_id)
+
+    def create_playlist(self, title, description='', privacy='private'):
+        return self.public.create_playlist(title, description, privacy)
+
+    def delete_playlist(self, playlist_id):
+        return self.public.delete_playlist(playlist_id)
+
+    def delete_subscription(self, subscription_id):
+        return self.public.delete_subscription(subscription_id)
+
+    def reorder_playlist_item(self, playlist_id, item_id, resource_video_id, new_position):
+        return self.public.reorder_playlist_item(playlist_id, item_id, resource_video_id, new_position)
+
+    # ── InnerTube API delegates ──────────────────────────────────────────
+
+    def fetch_innertube_subscriptions(self):
+        return self.innertube.fetch_innertube_subscriptions()
+
+    def fetch_channel_video_progress(self, channel_id):
+        return self.innertube.fetch_channel_video_progress(channel_id)
+
+    def get_lounge_token(self, screen_id):
+        return self.innertube.get_lounge_token(screen_id)
+
+    def cast_to_receiver(self, screen_id, video_ids, lounge_session=None):
+        return self.innertube.cast_to_receiver(screen_id, video_ids, lounge_session)
+
+    def get_now_playing(self, lounge_session):
+        return self.innertube.get_now_playing(lounge_session)
+
+    # ── Playback reporting ───────────────────────────────────────────────
+
+    def report_watch(self, video_id):
+        return self.cookie.report_watch(video_id)

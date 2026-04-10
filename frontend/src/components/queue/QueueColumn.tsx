@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -16,13 +16,14 @@ import {
 import { PlaylistAdd, Cast } from '@mui/icons-material';
 import type { QueueItem as QueueItemType } from '../../types';
 import QueueItemComponent from './QueueItem';
+import { formatDuration } from '../feeds/videoItemUtils';
 
 interface QueueColumnProps {
   queueItems: QueueItemType[];
   onRemove: (queueItemId: number) => void;
   onReorder: (ids: number[]) => void;
   onCreatePlaylist: () => void;
-  onCast: () => void;
+  onCast: () => Promise<void>;
   castAvailable: boolean;
 }
 
@@ -34,6 +35,7 @@ export default function QueueColumn({
   onCast,
   castAvailable,
 }: QueueColumnProps) {
+  const [casting, setCasting] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -51,6 +53,21 @@ export default function QueueColumn({
     onReorder(newItems.map((item) => item.id));
   }, [queueItems, onReorder]);
 
+  const totalSeconds = queueItems.reduce(
+    (sum, item) => sum + (item.video.duration_seconds ?? 0),
+    0,
+  );
+
+  const handleCast = useCallback(async () => {
+    if (casting) return;
+    setCasting(true);
+    try {
+      await onCast();
+    } finally {
+      setCasting(false);
+    }
+  }, [casting, onCast]);
+
   return (
     <div className="column">
       <div className="column-header">
@@ -67,15 +84,34 @@ export default function QueueColumn({
           {castAvailable && (
             <button
               className="btn-action"
-              title="Cast queue to device"
-              onClick={onCast}
-              disabled={queueItems.length === 0}
+              title={casting ? 'Casting queue...' : 'Cast queue to device'}
+              aria-busy={casting}
+              onClick={handleCast}
+              disabled={queueItems.length === 0 || casting}
             >
-              <Cast style={{ fontSize: '1rem' }} />
+              {casting ? (
+                <span
+                  className="spinner-border spinner-border-sm"
+                  role="status"
+                  aria-label="Casting queue"
+                />
+              ) : (
+                <Cast style={{ fontSize: '1rem' }} />
+              )}
             </button>
           )}
         </div>
       </div>
+      {queueItems.length > 0 && (
+        <div className="filter-tags">
+          <span className="filter-tag">
+            {queueItems.length} {queueItems.length === 1 ? 'video' : 'videos'}
+          </span>
+          {totalSeconds > 0 && (
+            <span className="filter-tag">{formatDuration(totalSeconds)}</span>
+          )}
+        </div>
+      )}
       <div className="column-body">
         {queueItems.length === 0 ? (
           <div className="empty-state">

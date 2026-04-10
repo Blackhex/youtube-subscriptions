@@ -15,9 +15,10 @@ class ExecuteWithRetryTest(TestCase):
         '__init__', lambda self: None,
     )
     def test_retries_on_409_then_succeeds(self, mock_sleep):
-        from subscriptions.youtube_service import YouTubeService
+        from subscriptions.youtube_service import YouTubeService, YouTubePublicAPI
 
         yt = YouTubeService()
+        yt.public = YouTubePublicAPI.__new__(YouTubePublicAPI)
 
         # Build a mock request whose execute() raises 409 twice, then succeeds
         mock_request = MagicMock()
@@ -40,9 +41,10 @@ class ExecuteWithRetryTest(TestCase):
         '__init__', lambda self: None,
     )
     def test_raises_409_after_max_retries_exhausted(self, mock_sleep):
-        from subscriptions.youtube_service import YouTubeService
+        from subscriptions.youtube_service import YouTubeService, YouTubePublicAPI
 
         yt = YouTubeService()
+        yt.public = YouTubePublicAPI.__new__(YouTubePublicAPI)
 
         mock_request = MagicMock()
         resp_409 = MagicMock()
@@ -62,9 +64,10 @@ class ExecuteWithRetryTest(TestCase):
         '__init__', lambda self: None,
     )
     def test_does_not_retry_on_404(self, mock_sleep):
-        from subscriptions.youtube_service import YouTubeService
+        from subscriptions.youtube_service import YouTubeService, YouTubePublicAPI
 
         yt = YouTubeService()
+        yt.public = YouTubePublicAPI.__new__(YouTubePublicAPI)
 
         mock_request = MagicMock()
         resp_404 = MagicMock()

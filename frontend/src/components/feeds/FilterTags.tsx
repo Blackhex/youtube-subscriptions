@@ -32,8 +32,10 @@ export default function FilterTags({ feed, categories }: FilterTagsProps) {
   }
 
   if (feed.filter_video_type) {
-    const typeLabels: Record<string, string> = { video: 'Regular', short: 'Shorts', live: 'Live' };
-    tags.push(typeLabels[feed.filter_video_type] ?? feed.filter_video_type);
+    const typeLabels: Record<string, string> = { video: 'Regular', short: 'Shorts', live: 'Live', upcoming: 'Upcoming' };
+    const types = feed.filter_video_type.split(',').map(t => t.trim()).filter(Boolean);
+    const labels = types.map(t => typeLabels[t] ?? t);
+    tags.push(labels.join(', '));
   }
 
   if (feed.filter_min_duration != null || feed.filter_max_duration != null) {

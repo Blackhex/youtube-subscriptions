@@ -76,6 +76,19 @@ description: "CSS design system and styling for YouTube Subscriptions Organizer.
 - Drag handle with `drag_indicator` icon
 - Collapse/expand via `ExpandMore` rotation
 
+### Inline Drag Handles Inside Truncating Text (`.feed-title-handle`)
+Pattern for making an inline element inside a `text-overflow: ellipsis` container a WCAG 2.2 SC 2.5.8 (24×24) hit target:
+- `display: inline` cannot grow vertically — vertical padding does not affect the box height. Use `display: inline-block` with `padding: 2px 6px; margin: -2px -6px` so the hit area grows while the surrounding layout stays visually identical (vertical margins on inline-block boxes do shrink the line box back).
+- An `inline-block` is an atomic box, so the parent's `text-overflow: ellipsis` **does not** apply to it — long text is hard-clipped with no ellipsis. Move the truncation onto the span itself: `max-width`, `overflow: hidden`, `text-overflow: ellipsis`, `vertical-align: bottom`.
+- With `box-sizing: border-box` (Bootstrap Reboot), `max-width: 100%` resolves against the parent's *content* box and then subtracts the span's own padding, clipping even short labels. Compensate with `max-width: calc(100% + <horizontal padding total>)` — e.g. `calc(100% + 12px)` for `padding: 2px 6px`.
+- The parent's `overflow: hidden` clips the handle's hover background and focus ring. Give the parent matching `padding: 2px 6px; margin: -2px -6px` (scope with `:has(.feed-title-handle)` so other headers are untouched).
+- Outlines and outset `box-shadow` rings are still clipped by an ancestor `overflow: hidden`. Use an **inset** ring instead: `box-shadow: inset 0 0 0 2px var(--md-primary), inset 0 0 0 0.2rem var(--md-primary-tint-15)` with `outline: none`.
+- `cursor: grab`, `:active { cursor: grabbing }`, `user-select: none`, `touch-action: none` are all required by dnd-kit `PointerSensor` — never drop them.
+
+### Drag State Styling
+- Never reuse blanket `opacity: 0.5` for "being dragged" — `.video-item.watched` already owns 50% opacity as the *watched* semantic, so a dimmed column reads as all-watched.
+- `.column.is-drag-source`: `outline: 2px dashed var(--md-primary); outline-offset: -2px` (negative offset keeps the dashes inside the column's `overflow: hidden`), and dim only `.column-header` with `opacity: 0.5`. The dashed outline doubles as the drop-position indicator.
+
 ## Constraints
 - Bootstrap 5 imported via npm (`import 'bootstrap/dist/css/bootstrap.min.css'` in main.tsx)
 - All overrides in `app.css`, no CSS-in-JS

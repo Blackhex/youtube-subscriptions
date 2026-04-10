@@ -1,7 +1,7 @@
 import React from 'react';
 import type { SyntheticListenerMap } from '@dnd-kit/core/dist/hooks/utilities';
 import type { Video } from '../../types';
-import { PlaylistAdd, PlaylistAddCheck, Close, DragIndicator } from '@mui/icons-material';
+import { PlaylistAdd, PlaylistAddCheck, Close, DragIndicator, Visibility } from '@mui/icons-material';
 
 export function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -28,6 +28,7 @@ interface VideoItemProps {
     onAddToQueue?: (videoId: string) => void;
     onAddToPlaylist?: (video: Video) => void;
     onRemove?: () => void;
+    onMarkWatched?: (videoId: string) => void;
     showDragHandle?: boolean;
   };
   dragListeners?: SyntheticListenerMap;
@@ -63,7 +64,7 @@ const VideoItem = React.memo(function VideoItem({ video, actions, dragListeners 
         {video.duration_seconds != null && video.duration_seconds > 0 && (
           <span className="duration-badge">{formatDuration(video.duration_seconds)}</span>
         )}
-        {progress > 0 && progress < 100 && (
+        {progress > 0 && (
           <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
         )}
       </div>
@@ -88,6 +89,15 @@ const VideoItem = React.memo(function VideoItem({ video, actions, dragListeners 
             <span className="drag-handle" {...(dragListeners ?? {})}>
               <DragIndicator style={{ fontSize: '1rem' }} />
             </span>
+          )}
+          {actions?.onMarkWatched && progress < 95 && (
+            <button
+              className="btn-action btn-action-reveal"
+              title="Mark as watched"
+              onClick={(e) => { e.stopPropagation(); actions.onMarkWatched!(video.video_id); }}
+            >
+              <Visibility style={{ fontSize: '1rem' }} />
+            </button>
           )}
           {actions?.onAddToQueue && (
             <button

@@ -1,4 +1,12 @@
 {
+  "inputs": [
+    {
+      "args": "http://127.0.0.1:8001",
+      "command": "simpleBrowser.api.open",
+      "id": "openSimpleBrowser",
+      "type": "command"
+    }
+  ],
   "tasks": [
     {
       "command": "python manage.py runserver 0.0.0.0:8000",
@@ -22,7 +30,7 @@
         }
       ],
       "runOptions": {
-        "runOn": "folderOpen"
+        "instanceLimit": 1
       },
       "type": "shell"
     },
@@ -49,7 +57,7 @@
         }
       ],
       "runOptions": {
-        "runOn": "folderOpen"
+        "instanceLimit": 1
       },
       "type": "shell"
     },
@@ -123,15 +131,11 @@
         "reveal": "silent"
       },
       "problemMatcher": [],
+      "runOptions": {
+        "instanceLimit": 1,
+        "runOn": "folderOpen"
+      },
       "type": "shell"
-    }
-  ],
-  "inputs": [
-    {
-      "id": "openSimpleBrowser",
-      "type": "command",
-      "command": "simpleBrowser.api.open",
-      "args": "http://127.0.0.1:8000"
     }
   ],
   "version": "2.0.0"

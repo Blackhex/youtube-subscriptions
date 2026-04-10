@@ -68,6 +68,7 @@ class Video(models.Model):
     duration_seconds = models.IntegerField(blank=True, null=True)
     video_type = models.CharField(max_length=32, blank=True, null=True)
     playback_progress = models.IntegerField(blank=True, null=True)
+    watched_locally = models.BooleanField(default=False)
     fetched_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

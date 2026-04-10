@@ -44,7 +44,24 @@ description: "Django REST Framework API implementation for YouTube Subscriptions
 
 #### Feed (`FeedViewSet(ModelViewSet)`)
 - Standard CRUD
+- `perform_create` appends: `sort_order = Max('sort_order') + 1` (0 when empty), unless `serializer.validated_data` already carries a non-null `sort_order`. Check *validated* data, not `request.data` — `sort_order` is writable via `fields = '__all__'`, so a client round-tripping a full object would otherwise stack every new feed at 0
+- `@action reorder` → `POST /api/feeds/reorder/` with `{ ordered_ids }`; index-based `.update()` in `transaction.atomic()`
 - `@action videos` → filtered query with AND/OR category groups, type, duration, age, play state
+
+#### Reorder endpoint validation (applies to every `reorder` action)
+Validate list-ness, length, **and element type**. `Model.objects.filter(id="abc")` raises a bare `ValueError` (and `id=[1,2]` a `TypeError`), neither of which DRF converts — the client gets a 500 instead of a 400:
+```python
+raw_ids = request.data.get('ordered_ids', [])
+if not isinstance(raw_ids, list):
+    return Response({'error': 'ordered_ids must be a list.'}, status=400)
+if len(raw_ids) > 1000:
+    return Response({'error': 'ordered_ids must contain at most 1000 items.'}, status=400)
+try:
+    ordered_ids = [int(i) for i in raw_ids]
+except (TypeError, ValueError):
+    return Response({'error': 'ordered_ids must contain integers.'}, status=400)
+```
+The cap matters because each element is a separate `UPDATE` inside one atomic block, holding the SQLite write lock. `CategoryViewSet.reorder` predates this and still lacks element validation.
 
 #### Sync Views (APIView)
 - `SyncAllView` → POST starts daemon thread, returns 202

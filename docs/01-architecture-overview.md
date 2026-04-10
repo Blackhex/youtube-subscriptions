@@ -159,8 +159,11 @@ youtube-subscriptions/
 ├── frontend/                    # React SPA (Vite + TypeScript)
 │   ├── package.json
 │   ├── vite.config.ts
+│   ├── vitest.config.ts         # Unit tests; excludes e2e/ so Playwright specs aren't collected
+│   ├── playwright.config.ts     # E2E; reuses the running Vite/Django dev servers
 │   ├── tsconfig.json
 │   ├── index.html
+│   ├── e2e/                     # Playwright specs + helpers (type-checked via tsconfig.node.json)
 │   └── src/
 │       ├── main.tsx             # React entry point
 │       ├── App.tsx              # Root component with section routing
