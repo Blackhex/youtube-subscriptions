@@ -6,7 +6,9 @@ import { mockSubscription } from '../../../test/helpers';
 describe('SubscriptionItem', () => {
   const defaultProps = {
     isSelected: false,
+    isActive: false,
     onToggleSelection: vi.fn(),
+    onShowVideos: vi.fn(),
     onDelete: vi.fn(),
   };
 
@@ -42,17 +44,18 @@ describe('SubscriptionItem', () => {
     expect(onDelete).toHaveBeenCalledWith(42);
   });
 
-  it('checkbox reflects selected state', () => {
+  it('selection button reflects selected state', () => {
     const sub = mockSubscription();
-    const { rerender } = render(
+    const { container, rerender } = render(
       <SubscriptionItem subscription={sub} {...defaultProps} isSelected={false} />
     );
-    const checkbox = screen.getByRole('checkbox') as HTMLInputElement;
-    expect(checkbox.checked).toBe(false);
+    expect(screen.getByRole('button', { name: 'Select' })).toBeInTheDocument();
+    expect(container.querySelector('.subscription-item')).not.toHaveClass('selected');
 
     rerender(
       <SubscriptionItem subscription={sub} {...defaultProps} isSelected={true} />
     );
-    expect(checkbox.checked).toBe(true);
+    expect(screen.getByRole('button', { name: 'Deselect' })).toBeInTheDocument();
+    expect(container.querySelector('.subscription-item')).toHaveClass('selected');
   });
 });

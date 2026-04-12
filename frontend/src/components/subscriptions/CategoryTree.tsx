@@ -1,22 +1,57 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DndContext,
+  DragOverlay,
   closestCenter,
   KeyboardSensor,
   PointerSensor,
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import type { DragEndEvent } from '@dnd-kit/core';
+import type { DragStartEvent, DragEndEvent } from '@dnd-kit/core';
 import {
   SortableContext,
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { Description } from '@mui/icons-material';
+import { Description, DragIndicator, Folder } from '@mui/icons-material';
 import { useAppContext } from '../../context/AppContext';
 import CategoryNode from './CategoryNode';
 import type { Category } from '../../types';
+
+const COLLAPSED_STORAGE_KEY = 'categoryCollapsedIds';
+
+// Collapsed ids are stored rather than expanded ones so untouched and freshly imported
+// categories (which get new database ids) default to expanded.
+function loadCollapsedIds(): Set<number> {
+  try {
+    const saved = localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    if (!saved) return new Set<number>();
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return new Set<number>();
+    return new Set(parsed.filter((id): id is number => typeof id === 'number'));
+  } catch {
+    return new Set<number>();
+  }
+}
+
+function buildCategoryMaps(categories: Category[]) {
+  const parentMap = new Map<number, number | null>();
+  const siblingsMap = new Map<number | null, number[]>();
+
+  function walk(cats: Category[], parentId: number | null) {
+    const ids = cats.map(c => c.id);
+    siblingsMap.set(parentId, ids);
+    for (const cat of cats) {
+      parentMap.set(cat.id, parentId);
+      if (cat.children.length > 0) {
+        walk(cat.children, cat.id);
+      }
+    }
+  }
+  walk(categories, null);
+  return { parentMap, siblingsMap };
+}
 
 interface CategoryTreeProps {
   categories: Category[];
@@ -25,6 +60,7 @@ interface CategoryTreeProps {
   subscriptions: { id: number; categories: { id: number; name: string }[] }[];
   onSelectCategory: (id: number | null) => void;
   onReorderCategories: (parentId: number | null, orderedIds: number[]) => void;
+  onMoveCategory: (categoryId: number, newParentId: number | null, newSiblingOrder: number[]) => Promise<void>;
   onEditCategory: (category: Category) => void;
   onDeleteCategory: (category: Category) => void;
   onAssign: (subIds: number[], catId: number) => Promise<void>;
@@ -43,6 +79,7 @@ export default function CategoryTree({
   subscriptions,
   onSelectCategory,
   onReorderCategories,
+  onMoveCategory,
   onEditCategory,
   onDeleteCategory,
   onAssign,
@@ -54,7 +91,24 @@ export default function CategoryTree({
   selectedCategoryId,
 }: CategoryTreeProps) {
   const { dispatch } = useAppContext();
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [collapsedIds, setCollapsedIds] = useState<Set<number>>(loadCollapsedIds);
+  const [activeCategory, setActiveCategory] = useState<Category | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsedIds]));
+  }, [collapsedIds]);
+
+  const categoryById = useMemo(() => {
+    const map = new Map<number, Category>();
+    function walk(cats: Category[]) {
+      for (const cat of cats) {
+        map.set(cat.id, cat);
+        if (cat.children.length > 0) walk(cat.children);
+      }
+    }
+    walk(categories);
+    return map;
+  }, [categories]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -62,7 +116,7 @@ export default function CategoryTree({
   );
 
   const toggleExpand = useCallback((id: number) => {
-    setExpandedIds((prev) => {
+    setCollapsedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
         next.delete(id);
@@ -106,26 +160,69 @@ export default function CategoryTree({
     await onRefreshSubscriptions();
   }, [selectedSubscriptionIds, onUnassign, onRefreshCategories, onRefreshSubscriptions]);
 
-  const topLevelIds = useMemo(() => categories.map((c) => c.id), [categories]);
+  const topLevelIds = useMemo(() => categories.map(c => c.id), [categories]);
+
+  const { parentMap, siblingsMap } = useMemo(() => buildCategoryMaps(categories), [categories]);
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const cat = categoryById.get(event.active.id as number);
+    setActiveCategory(cat ?? null);
+  }, [categoryById]);
+
+  const handleDragCancel = useCallback(() => {
+    setActiveCategory(null);
+  }, []);
 
   const handleDragEnd = useCallback((event: DragEndEvent) => {
+    setActiveCategory(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
 
-    const oldIndex = topLevelIds.indexOf(active.id as number);
-    const newIndex = topLevelIds.indexOf(over.id as number);
-    if (oldIndex === -1 || newIndex === -1) return;
+    const activeId = active.id as number;
+    const overId = over.id as number;
+    const activeParent = parentMap.get(activeId) ?? null;
+    const overParent = parentMap.get(overId) ?? null;
 
-    const newOrder = [...topLevelIds];
-    newOrder.splice(oldIndex, 1);
-    newOrder.splice(newIndex, 0, active.id as number);
-    onReorderCategories(null, newOrder);
-  }, [topLevelIds, onReorderCategories]);
+    if (activeParent === overParent) {
+      // Same parent: reorder within siblings
+      const siblings = siblingsMap.get(activeParent);
+      if (!siblings) return;
+      const oldIndex = siblings.indexOf(activeId);
+      const newIndex = siblings.indexOf(overId);
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      const newOrder = [...siblings];
+      newOrder.splice(oldIndex, 1);
+      newOrder.splice(newIndex, 0, activeId);
+      onReorderCategories(activeParent, newOrder);
+    } else {
+      // Different parent: re-parent and insert at position
+      const targetSiblings = siblingsMap.get(overParent) ?? [];
+      const overIndex = targetSiblings.indexOf(overId);
+      const newOrder = targetSiblings.filter(id => id !== activeId);
+      const insertAt = newOrder.indexOf(overId);
+      newOrder.splice(insertAt === -1 ? overIndex : insertAt, 0, activeId);
+
+      // Auto-expand the target parent so the moved item is visible
+      if (overParent !== null) {
+        setCollapsedIds(prev => {
+          const next = new Set(prev);
+          next.delete(overParent);
+          return next;
+        });
+      }
+
+      onMoveCategory(activeId, overParent, newOrder);
+    }
+  }, [parentMap, siblingsMap, onReorderCategories, onMoveCategory]);
 
   const isSelectionMode = selectedSubscriptionIds.length > 0;
 
   return (
     <>
+      <div className="category-sidebar-header">
+        <h3 className="m-0">Categories</h3>
+      </div>
       {/* Special filters */}
       <div
         className={`special-filter${selectedCategoryId === null ? ' active' : ''}`}
@@ -161,7 +258,9 @@ export default function CategoryTree({
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
         >
           <SortableContext items={topLevelIds} strategy={verticalListSortingStrategy}>
             {categories.map((cat) => (
@@ -172,8 +271,9 @@ export default function CategoryTree({
                 selectedCategoryId={selectedCategoryId}
                 selectedSubscriptionIds={selectedSubscriptionIds}
                 suggestedCategoryIds={suggestedCategoryIds}
-                expandedIds={expandedIds}
+                collapsedIds={collapsedIds}
                 subscriptionCategoryIds={subscriptionCategoryIds}
+                activeId={activeCategory?.id ?? null}
                 onSelect={(id) => onSelectCategory(id)}
                 onToggleExpand={toggleExpand}
                 onEdit={onEditCategory}
@@ -183,6 +283,16 @@ export default function CategoryTree({
               />
             ))}
           </SortableContext>
+          <DragOverlay dropAnimation={null}>
+            {activeCategory ? (
+              <div className="category-node drag-overlay">
+                <DragIndicator sx={{ fontSize: '0.85rem' }} />
+                <Folder sx={{ fontSize: '0.85rem', color: 'var(--md-text-meta)', marginRight: '2px' }} />
+                <span className="category-name">{activeCategory.name}</span>
+                <span className="category-count">{activeCategory.subscription_count}</span>
+              </div>
+            ) : null}
+          </DragOverlay>
         </DndContext>
       </div>
     </>

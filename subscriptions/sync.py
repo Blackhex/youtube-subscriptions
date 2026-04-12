@@ -191,33 +191,29 @@ def _get_channels_to_sync() -> list[str]:
     return list(Subscription.objects.values_list('channel_id', flat=True))
 
 
-def _sync_single_channel(credentials, channel_id: str, force: bool):
-    """Sync videos for a single channel. Returns count of new videos."""
+def _fetch_channel_videos(credentials, channel_id: str, force: bool) -> tuple[int, str]:
+    """Fetch and store videos for a single channel. Returns (new video count, outcome)."""
     yt_service = YouTubeService.from_credentials(credentials)
     try:
         sub = Subscription.objects.get(channel_id=channel_id)
     except Subscription.DoesNotExist:
         logger.warning("Subscription not found for channel %s", channel_id)
-        return 0
-
-    _sync_state['current_channel'] = sub.channel_title
+        return 0, 'missing'
 
     # Staleness check
     if not force and sub.videos_synced_at:
         if timezone.now() - sub.videos_synced_at < timedelta(minutes=15):
-            with _sync_lock:
-                _sync_state['skipped'] += 1
-                _sync_state['processed'] += 1
-            return 0
+            return 0, 'skipped'
 
     # Get uploads playlist ID
     details = yt_service.fetch_channel_details([channel_id])
     channel_detail = details.get(channel_id)
     if not channel_detail or not channel_detail.get('uploads_playlist_id'):
         logger.warning("No uploads playlist for channel %s", channel_id)
-        with _sync_lock:
-            _sync_state['processed'] += 1
-        return 0
+        # Record the attempt so on-demand sync does not refetch on every request
+        sub.videos_synced_at = timezone.now()
+        sub.save(update_fields=['videos_synced_at'])
+        return 0, 'no_uploads'
 
     playlist_id = channel_detail['uploads_playlist_id']
 
@@ -268,16 +264,118 @@ def _sync_single_channel(credentials, channel_id: str, force: bool):
                 video_type=details.get('video_type'),
             )
 
-    with _sync_lock:
-        _sync_state['fetched_new'] += len(new_video_ids)
-
     # Update subscription's videos_synced_at
     sub.videos_synced_at = timezone.now()
     sub.save(update_fields=['videos_synced_at'])
 
+    return len(new_video_ids), 'synced'
+
+
+def _sync_single_channel(credentials, channel_id: str, force: bool):
+    """Sync videos for a single channel, updating sync progress. Returns count of new videos."""
+    channel_title = (
+        Subscription.objects.filter(channel_id=channel_id)
+        .values_list('channel_title', flat=True)
+        .first()
+    )
+    if channel_title is not None:
+        _sync_state['current_channel'] = channel_title
+
+    new_count, outcome = _fetch_channel_videos(credentials, channel_id, force)
+
+    if outcome == 'missing':
+        return 0
+
     with _sync_lock:
+        if outcome == 'skipped':
+            _sync_state['skipped'] += 1
+        elif outcome == 'synced':
+            _sync_state['fetched_new'] += new_count
         _sync_state['processed'] += 1
 
+    return new_count
+
+
+def sync_channel_videos_now(channel_id: str, force: bool = False) -> int:
+    """Fetch one channel's videos synchronously, without touching background sync state."""
+    yt_service = YouTubeService()
+    new_count, _ = _fetch_channel_videos(yt_service.credentials, channel_id, force)
+    return new_count
+
+
+BACKFILL_MAX_PAGES = 5
+
+
+def backfill_channel_videos(channel_id: str, needed: int) -> int:
+    """Walk older uploads for one channel until `needed` local videos exist. Returns new count."""
+    try:
+        sub = Subscription.objects.get(channel_id=channel_id)
+    except Subscription.DoesNotExist:
+        return 0
+
+    if sub.uploads_backfilled:
+        return 0
+
+    if Video.objects.filter(channel_id=channel_id).count() >= needed:
+        return 0
+
+    yt_service = YouTubeService()
+
+    details = yt_service.fetch_channel_details([channel_id])
+    channel_detail = details.get(channel_id) or {}
+    playlist_id = channel_detail.get('uploads_playlist_id')
+    if not playlist_id:
+        sub.uploads_backfilled = True
+        sub.save(update_fields=['uploads_backfilled'])
+        return 0
+
+    page_token = sub.uploads_page_token
+    new_video_ids = []
+
+    for _ in range(BACKFILL_MAX_PAGES):
+        items, next_page_token = yt_service.fetch_playlist_items(playlist_id, 50, page_token)
+
+        for item in items:
+            snippet = item.get('snippet', {})
+            video_id = snippet.get('resourceId', {}).get('videoId')
+            if not video_id:
+                continue
+            thumbnails = snippet.get('thumbnails', {})
+            _, created = Video.objects.get_or_create(
+                video_id=video_id,
+                defaults={
+                    'channel_id': channel_id,
+                    'title': snippet.get('title', ''),
+                    'published_at': snippet.get('publishedAt'),
+                    'thumbnail_url': (thumbnails.get('medium', {}).get('url')
+                                      or thumbnails.get('default', {}).get('url')),
+                },
+            )
+            if created:
+                new_video_ids.append(video_id)
+
+        page_token = next_page_token
+        sub.uploads_page_token = page_token
+        if not page_token:
+            sub.uploads_backfilled = True
+            sub.save(update_fields=['uploads_page_token', 'uploads_backfilled'])
+            break
+
+        sub.save(update_fields=['uploads_page_token'])
+
+        if Video.objects.filter(channel_id=channel_id).count() >= needed:
+            break
+
+    for i in range(0, len(new_video_ids), 50):
+        batch = new_video_ids[i:i + 50]
+        video_details = yt_service.fetch_video_details(batch)
+        for vid_id, detail in video_details.items():
+            Video.objects.filter(video_id=vid_id).update(
+                duration_seconds=detail.get('duration_seconds'),
+                video_type=detail.get('video_type'),
+            )
+
+    logger.info("Backfilled %d videos for channel %s", len(new_video_ids), channel_id)
     return len(new_video_ids)
 
 

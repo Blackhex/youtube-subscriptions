@@ -8,6 +8,65 @@ from django.test import TestCase
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# YouTubePublicAPI Tests
+# ═════════════════════════════════════════════════════════════════════════════
+
+class YouTubePublicAPIVideoDetailsTest(TestCase):
+    @staticmethod
+    def _video(video_id, duration, published_at, width, height, live='none'):
+        return {
+            'id': video_id,
+            'contentDetails': {'duration': duration},
+            'snippet': {
+                'liveBroadcastContent': live,
+                'publishedAt': published_at,
+                'title': video_id,
+            },
+            'liveStreamingDetails': {},
+            'player': {
+                'embedWidth': str(width),
+                'embedHeight': str(height),
+            },
+        }
+
+    def test_classifies_shorts_by_duration_date_and_aspect_ratio(self):
+        from subscriptions.youtube_service import YouTubePublicAPI
+
+        api = YouTubePublicAPI.__new__(YouTubePublicAPI)
+        api.youtube = MagicMock()
+        request = api.youtube.videos.return_value.list.return_value
+        api._execute_with_retry = MagicMock(return_value={'items': [
+            self._video('modern_vertical', 'PT1M11S', '2026-08-02T07:00:35Z', 1000, 1778),
+            self._video('modern_landscape', 'PT1M11S', '2026-08-02T07:00:35Z', 1000, 563),
+            self._video('legacy_vertical_long', 'PT1M11S', '2024-10-14T23:59:59Z', 1000, 1778),
+            self._video('legacy_vertical_short', 'PT59S', '2024-10-14T23:59:59Z', 1000, 1778),
+            self._video('too_long', 'PT3M1S', '2026-08-02T07:00:35Z', 1000, 1778),
+            self._video('live', 'PT1M11S', '2026-08-02T07:00:35Z', 1000, 1778, 'live'),
+        ]})
+
+        details = api.fetch_video_details([
+            'modern_vertical', 'modern_landscape', 'legacy_vertical_long',
+            'legacy_vertical_short', 'too_long', 'live',
+        ])
+
+        self.assertEqual(details['modern_vertical']['video_type'], 'short')
+        self.assertEqual(details['modern_landscape']['video_type'], 'video')
+        self.assertEqual(details['legacy_vertical_long']['video_type'], 'video')
+        self.assertEqual(details['legacy_vertical_short']['video_type'], 'short')
+        self.assertEqual(details['too_long']['video_type'], 'video')
+        self.assertEqual(details['live']['video_type'], 'live')
+        api.youtube.videos.return_value.list.assert_called_once_with(
+            id=(
+                'modern_vertical,modern_landscape,legacy_vertical_long,'
+                'legacy_vertical_short,too_long,live'
+            ),
+            part='contentDetails,snippet,liveStreamingDetails,player',
+            maxWidth=1000,
+        )
+        api._execute_with_retry.assert_called_once_with(request)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # YouTubeInnerTubeAPI Cast Tests
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -163,6 +222,31 @@ class YouTubeInnerTubeCastTest(TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class YouTubeCookieAPITest(TestCase):
+    def test_launch_browser_prefers_installed_chrome(self):
+        from subscriptions.youtube_service import YouTubeCookieAPI
+
+        playwright = MagicMock()
+        browser = playwright.chromium.launch.return_value
+
+        result = YouTubeCookieAPI._launch_browser(playwright)
+
+        self.assertIs(result, browser)
+        playwright.chromium.launch.assert_called_once_with(channel='chrome', headless=True)
+
+    def test_launch_browser_falls_back_to_bundled_chromium(self):
+        from subscriptions.youtube_service import YouTubeCookieAPI
+
+        playwright = MagicMock()
+        bundled_browser = MagicMock()
+        playwright.chromium.launch.side_effect = [RuntimeError('Chrome missing'), bundled_browser]
+
+        result = YouTubeCookieAPI._launch_browser(playwright)
+
+        self.assertIs(result, bundled_browser)
+        self.assertEqual(playwright.chromium.launch.call_count, 2)
+        playwright.chromium.launch.assert_any_call(channel='chrome', headless=True)
+        playwright.chromium.launch.assert_any_call(headless=True)
+
     @patch('subscriptions.youtube_service.os.path.exists', return_value=True)
     def test_report_watch_rejects_invalid_video_id(self, mock_exists):
         from subscriptions.youtube_service import YouTubeCookieAPI

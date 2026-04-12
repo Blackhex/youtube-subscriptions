@@ -8,6 +8,7 @@ import {
   Delete,
 } from '@mui/icons-material';
 import { useSortable } from '@dnd-kit/sortable';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { Category } from '../../types';
 
@@ -17,8 +18,9 @@ interface CategoryNodeProps {
   selectedCategoryId: number | null;
   selectedSubscriptionIds: number[];
   suggestedCategoryIds: number[];
-  expandedIds: Set<number>;
+  collapsedIds: Set<number>;
   subscriptionCategoryIds: Set<number>;
+  activeId: number | null;
   onSelect: (id: number) => void;
   onToggleExpand: (id: number) => void;
   onEdit: (category: Category) => void;
@@ -33,8 +35,9 @@ export default function CategoryNode({
   selectedCategoryId,
   selectedSubscriptionIds,
   suggestedCategoryIds,
-  expandedIds,
+  collapsedIds,
   subscriptionCategoryIds,
+  activeId,
   onSelect,
   onToggleExpand,
   onEdit,
@@ -44,7 +47,7 @@ export default function CategoryNode({
 }: CategoryNodeProps) {
   const isSelectionMode = selectedSubscriptionIds.length > 0;
   const isActive = selectedCategoryId === category.id;
-  const isExpanded = expandedIds.has(category.id);
+  const isExpanded = !collapsedIds.has(category.id);
   const isSuggested = suggestedCategoryIds.includes(category.id);
   const hasChildren = category.children.length > 0;
 
@@ -67,6 +70,7 @@ export default function CategoryNode({
     transform,
     transition,
     isDragging,
+    isOver,
   } = useSortable({ id: category.id });
 
   const style = {
@@ -87,7 +91,7 @@ export default function CategoryNode({
       <div
         ref={setNodeRef}
         style={style}
-        className={`category-node${isActive ? ' active' : ''}${isDragging ? ' dragging' : ''}${isSuggested ? ' suggested-category' : ''}`}
+        className={`category-node${isActive ? ' active' : ''}${isDragging ? ' dragging' : ''}${isOver && activeId !== null && activeId !== category.id ? ' drag-over' : ''}${isSuggested ? ' suggested-category' : ''}`}
         onClick={() => !isSelectionMode && onSelect(category.id)}
       >
         <span className="drag-handle" {...attributes} {...listeners}>
@@ -150,24 +154,27 @@ export default function CategoryNode({
 
       {hasChildren && (
         <div className={`category-children${!isExpanded ? ' collapsed' : ''}`}>
-          {category.children.map((child) => (
-            <CategoryNode
-              key={child.id}
-              category={child}
-              depth={depth + 1}
-              selectedCategoryId={selectedCategoryId}
-              selectedSubscriptionIds={selectedSubscriptionIds}
-              suggestedCategoryIds={suggestedCategoryIds}
-              expandedIds={expandedIds}
-              subscriptionCategoryIds={subscriptionCategoryIds}
-              onSelect={onSelect}
-              onToggleExpand={onToggleExpand}
-              onEdit={onEdit}
-              onDelete={onDelete}
-              onAssign={onAssign}
-              onUnassign={onUnassign}
-            />
-          ))}
+          <SortableContext items={category.children.map(c => c.id)} strategy={verticalListSortingStrategy}>
+            {category.children.map((child) => (
+              <CategoryNode
+                key={child.id}
+                category={child}
+                depth={depth + 1}
+                selectedCategoryId={selectedCategoryId}
+                selectedSubscriptionIds={selectedSubscriptionIds}
+                suggestedCategoryIds={suggestedCategoryIds}
+                collapsedIds={collapsedIds}
+                subscriptionCategoryIds={subscriptionCategoryIds}
+                activeId={activeId}
+                onSelect={onSelect}
+                onToggleExpand={onToggleExpand}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onAssign={onAssign}
+                onUnassign={onUnassign}
+              />
+            ))}
+          </SortableContext>
         </div>
       )}
     </>

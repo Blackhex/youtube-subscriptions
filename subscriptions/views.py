@@ -432,6 +432,70 @@ class SubscriptionViewSet(ModelViewSet):
         })
 
 
+class ChannelVideosView(APIView):
+    """Paginated list of locally synced videos for a single channel."""
+
+    def get(self, request, channel_id):
+        from .sync import backfill_channel_videos, is_sync_running, sync_channel_videos_now
+
+        page = int(request.query_params.get('page', 1))
+        per_page = min(int(request.query_params.get('per_page', 20)), 100)
+
+        if page == 1 and not is_sync_running():
+            subscription = Subscription.objects.filter(channel_id=channel_id).first()
+            # videos_synced_at, not the video count: a channel with zero uploads must not refetch
+            if subscription and subscription.videos_synced_at is None:
+                try:
+                    sync_channel_videos_now(channel_id)
+                except Exception as e:
+                    logger.warning("On-demand video sync failed for channel %s: %s", channel_id, e)
+
+        needed = page * per_page
+        if not is_sync_running() and Subscription.objects.filter(channel_id=channel_id).exists():
+            if Video.objects.filter(channel_id=channel_id).count() < needed:
+                try:
+                    backfill_channel_videos(channel_id, needed)
+                except Exception as e:
+                    logger.warning("Video backfill failed for channel %s: %s", channel_id, e)
+
+        qs = (
+            Video.objects.select_related('channel')
+            .filter(channel_id=channel_id)
+            .order_by('-published_at')
+        )
+
+        total = qs.count()
+        offset = (page - 1) * per_page
+        items = qs[offset:offset + per_page]
+
+        serializer = VideoSerializer(items, many=True)
+        return Response({
+            'items': serializer.data,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'has_more': (page * per_page) < total,
+        })
+
+
+class ChannelProgressView(APIView):
+    """Watch progress for a channel's videos, fetched live from YouTube."""
+
+    def get(self, request, channel_id):
+        try:
+            from .youtube_service import YouTubeService
+            yt = YouTubeService()
+            progress = yt.fetch_channel_video_progress(channel_id)
+        except Exception:
+            logger.warning("Failed to fetch watch progress for channel %s", channel_id)
+            return Response({'progress': {}})
+
+        for video_id, percent in progress.items():
+            Video.objects.filter(video_id=video_id).update(playback_progress=percent)
+
+        return Response({'progress': progress})
+
+
 class SubscriptionThumbnailView(APIView):
     def get(self, request, channel_id):
         try:

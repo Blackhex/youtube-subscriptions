@@ -29,6 +29,8 @@ _oauth_lock = threading.Lock()
 class YouTubePublicAPI:
     """YouTube Data API v3 client using OAuth credentials."""
 
+    _THREE_MINUTE_SHORTS_START = '2024-10-15T00:00:00Z'
+
     def __init__(self, credentials):
         self.credentials = credentials
         self.youtube = build('youtube', 'v3', credentials=credentials)
@@ -168,7 +170,8 @@ class YouTubePublicAPI:
             batch = video_ids[i:i + 50]
             request = self.youtube.videos().list(
                 id=','.join(batch),
-                part='contentDetails,snippet,liveStreamingDetails',
+                part='contentDetails,snippet,liveStreamingDetails,player',
+                maxWidth=1000,
             )
             response = self._execute_with_retry(request)
 
@@ -177,6 +180,7 @@ class YouTubePublicAPI:
                 snippet = item.get('snippet', {})
                 content = item.get('contentDetails', {})
                 live = item.get('liveStreamingDetails', {})
+                player = item.get('player', {})
 
                 duration_seconds = self._parse_iso8601_duration(content.get('duration'))
                 live_broadcast = snippet.get('liveBroadcastContent', 'none')
@@ -185,7 +189,11 @@ class YouTubePublicAPI:
                     video_type = 'live'
                 elif live_broadcast == 'upcoming':
                     video_type = 'upcoming'
-                elif duration_seconds is not None and duration_seconds <= 60:
+                elif self._is_short(
+                    duration_seconds,
+                    snippet.get('publishedAt'),
+                    player,
+                ):
                     video_type = 'short'
                 else:
                     video_type = 'video'
@@ -202,6 +210,25 @@ class YouTubePublicAPI:
 
         logger.info("Fetched details for %d videos", len(results))
         return results
+
+    @classmethod
+    def _is_short(cls, duration_seconds, published_at, player) -> bool:
+        if duration_seconds is None or duration_seconds > 180:
+            return False
+
+        try:
+            width = int(player.get('embedWidth', 0))
+            height = int(player.get('embedHeight', 0))
+        except (TypeError, ValueError):
+            width = height = 0
+
+        if not width or not height:
+            return duration_seconds <= 60
+        if height < width:
+            return False
+        if duration_seconds <= 60:
+            return True
+        return bool(published_at and published_at >= cls._THREE_MINUTE_SHORTS_START)
 
     def fetch_playlists(self) -> list[dict]:
         """Fetch all playlists owned by the user."""
@@ -678,6 +705,13 @@ class YouTubeCookieAPI:
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false})")
         return context
 
+    @staticmethod
+    def _launch_browser(playwright):
+        try:
+            return playwright.chromium.launch(channel='chrome', headless=True)
+        except Exception:
+            return playwright.chromium.launch(headless=True)
+
     @classmethod
     def get_login_state(cls):
         """Return current session status."""
@@ -699,7 +733,7 @@ class YouTubeCookieAPI:
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = self._launch_browser(p)
                 context = self._new_context(browser, storage_state=self._STATE_FILE)
                 page = context.new_page()
                 page.goto('https://www.youtube.com', wait_until='domcontentloaded')
@@ -743,7 +777,7 @@ class YouTubeCookieAPI:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = self._launch_browser(p)
                 context = self._new_context(browser, storage_state=self._STATE_FILE)
                 page = context.new_page()
 

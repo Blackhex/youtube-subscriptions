@@ -11,6 +11,8 @@ router.register(r'feeds', views.FeedViewSet)
 urlpatterns = [
     path("health/", views.HealthCheckView.as_view(), name="health-check"),
     path("subscriptions/<str:channel_id>/thumbnail/", views.SubscriptionThumbnailView.as_view(), name="subscription-thumbnail"),
+    path("subscriptions/<str:channel_id>/videos/", views.ChannelVideosView.as_view(), name="channel-videos"),
+    path("subscriptions/<str:channel_id>/progress/", views.ChannelProgressView.as_view(), name="channel-progress"),
     path("videos/<str:video_id>/thumbnail/", views.VideoThumbnailView.as_view(), name="video-thumbnail"),
     path("sync/all/", views.SyncAllView.as_view(), name="sync-all"),
     path("sync/videos/", views.SyncVideosView.as_view(), name="sync-videos"),

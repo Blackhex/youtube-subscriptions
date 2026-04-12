@@ -107,6 +107,18 @@ export function useSubscriptions() {
     );
   }, [subscriptions, searchQuery]);
 
+  const selectAll = useCallback(() => {
+    dispatch({ type: 'SET_SELECTION', ids: filteredSubscriptions.map((s) => s.id) });
+  }, [dispatch, filteredSubscriptions]);
+
+  const invertSelection = useCallback(() => {
+    const currentIds = new Set(state.selectedSubscriptionIds);
+    const inverted = filteredSubscriptions
+      .filter((s) => !currentIds.has(s.id))
+      .map((s) => s.id);
+    dispatch({ type: 'SET_SELECTION', ids: inverted });
+  }, [dispatch, state.selectedSubscriptionIds, filteredSubscriptions]);
+
   const refetchCurrentPage = useCallback(async () => {
     // Refetch all loaded pages to update assignment data
     setLoading(true);
@@ -142,6 +154,8 @@ export function useSubscriptions() {
     loadMore,
     toggleSelection,
     clearSelection,
+    selectAll,
+    invertSelection,
     assignToCategory,
     unassignFromCategory,
     deleteSubscription,

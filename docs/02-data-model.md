@@ -102,6 +102,8 @@ class Category(models.Model):
 | `last_published_at` | CharField(64) | nullable | Last video published ISO timestamp |
 | `synced_at` | DateTimeField | nullable | Last YouTube sync timestamp |
 | `videos_synced_at` | DateTimeField | nullable | Last video fetch timestamp |
+| `uploads_page_token` | CharField(256) | nullable | Resume token for the older-uploads backfill walk |
+| `uploads_backfilled` | BooleanField | default=False | True once the uploads playlist has been walked to the end |
 | `created_at` | DateTimeField | auto_now_add=True | Creation timestamp |
 | `categories` | ManyToManyField(Category) | through=SubscriptionCategory | Category assignments |
 

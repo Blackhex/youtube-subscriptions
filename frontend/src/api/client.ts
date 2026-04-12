@@ -42,6 +42,10 @@ export const unassignSubscription = (subId: number, catId: number) =>
   api.delete(`/subscriptions/${subId}/unassign/${catId}/`);
 export const fetchSuggestions = (subId: number) =>
   api.get<{ subscription_id: number; suggested_category_ids: number[] }>(`/subscriptions/${subId}/suggestions/`);
+export const fetchSubscriptionVideos = (channelId: string, params: { page?: number; per_page?: number }) =>
+  api.get<PaginatedResponse<Video>>(`/subscriptions/${channelId}/videos/`, { params });
+export const fetchChannelProgress = (channelId: string) =>
+  api.get<{ progress: Record<string, number> }>(`/subscriptions/${channelId}/progress/`);
 
 // Feeds
 export const fetchFeeds = () => api.get<Feed[]>('/feeds/');

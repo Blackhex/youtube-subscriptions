@@ -2,8 +2,9 @@ import { useCallback } from 'react';
 import { useAppContext } from '../../context/AppContext';
 import { useSubscriptions } from '../../hooks/useSubscriptions';
 import { useInfiniteScroll } from '../../hooks/useInfiniteScroll';
-import { useConfirm } from '../layout/ConfirmDialog';
+import { useConfirm } from '../../hooks/useConfirm';
 import SubscriptionItem from './SubscriptionItem';
+import { SelectAll, Deselect, SwapHoriz } from '@mui/icons-material';
 import type { Category } from '../../types';
 
 function getCategoryName(categories: Category[], id: number | null): string {
@@ -22,9 +23,11 @@ function getCategoryName(categories: Category[], id: number | null): string {
 
 interface SubscriptionListProps {
   confirm: ReturnType<typeof useConfirm>['confirm'];
+  activeChannelId: string | null;
+  onShowVideos: (channelId: string, channelTitle: string) => void;
 }
 
-export default function SubscriptionList({ confirm }: SubscriptionListProps) {
+export default function SubscriptionList({ confirm, activeChannelId, onShowVideos }: SubscriptionListProps) {
   const { state } = useAppContext();
   const {
     filteredSubscriptions,
@@ -35,6 +38,9 @@ export default function SubscriptionList({ confirm }: SubscriptionListProps) {
     setSearchQuery,
     loadMore,
     toggleSelection,
+    clearSelection,
+    selectAll,
+    invertSelection,
     deleteSubscription,
   } = useSubscriptions();
 
@@ -57,6 +63,17 @@ export default function SubscriptionList({ confirm }: SubscriptionListProps) {
     <div className="subscription-list">
       <div className="subscription-list-header">
         <h3>{categoryName} <span className="text-muted fs-6 fw-normal">({total})</span></h3>
+        <div className="d-flex align-items-center gap-1">
+          <button className="btn-action" title="Select All" onClick={selectAll}>
+            <SelectAll style={{ fontSize: '1rem' }} />
+          </button>
+          <button className="btn-action" title="Select None" onClick={clearSelection}>
+            <Deselect style={{ fontSize: '1rem' }} />
+          </button>
+          <button className="btn-action" title="Invert Selection" onClick={invertSelection}>
+            <SwapHoriz style={{ fontSize: '1rem' }} />
+          </button>
+        </div>
         <input
           type="text"
           className="subscription-search"
@@ -71,7 +88,9 @@ export default function SubscriptionList({ confirm }: SubscriptionListProps) {
             key={sub.id}
             subscription={sub}
             isSelected={state.selectedSubscriptionIds.includes(sub.id)}
+            isActive={sub.channel_id === activeChannelId}
             onToggleSelection={toggleSelection}
+            onShowVideos={onShowVideos}
             onDelete={handleDelete}
           />
         ))}

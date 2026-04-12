@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppContext } from '../../context/AppContext';
 import { useCategories } from '../../hooks/useCategories';
 import { useSubscriptions } from '../../hooks/useSubscriptions';
-import { useConfirm } from '../layout/ConfirmDialog';
+import { useConfirm } from '../../hooks/useConfirm';
 import CategoryTree from './CategoryTree';
 import SubscriptionList from './SubscriptionList';
+import ChannelVideosColumn from './ChannelVideosColumn';
 import CategoryModal from './CategoryModal';
 import type { Category } from '../../types';
 
@@ -37,6 +38,7 @@ export default function SubscriptionsSection({
     updateCategory,
     deleteCategory,
     reorderCategories,
+    moveCategory,
     selectCategory,
   } = useCategories();
 
@@ -44,17 +46,24 @@ export default function SubscriptionsSection({
     subscriptions,
     assignToCategory,
     unassignFromCategory,
-    fetchSuggestions: _fetchSuggestions,
     refetchCurrentPage,
   } = useSubscriptions();
 
   const { state } = useAppContext();
+
+  // Active channel videos
+  const [activeChannel, setActiveChannel] = useState<{id: string; title: string} | null>(null);
+
+  const handleShowVideos = useCallback((channelId: string, channelTitle: string) => {
+    setActiveChannel({ id: channelId, title: channelTitle });
+  }, []);
 
   // Sidebar resize
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem(SIDEBAR_KEY);
     return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
   });
+  const [resizing, setResizing] = useState(false);
   const isResizing = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -64,6 +73,7 @@ export default function SubscriptionsSection({
 
   const handleMouseDown = useCallback(() => {
     isResizing.current = true;
+    setResizing(true);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
 
@@ -77,6 +87,7 @@ export default function SubscriptionsSection({
 
     const handleMouseUp = () => {
       isResizing.current = false;
+      setResizing(false);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       document.removeEventListener('mousemove', handleMouseMove);
@@ -130,6 +141,7 @@ export default function SubscriptionsSection({
           subscriptions={subscriptions}
           onSelectCategory={selectCategory}
           onReorderCategories={reorderCategories}
+          onMoveCategory={moveCategory}
           onEditCategory={handleEditCategory}
           onDeleteCategory={handleDeleteCategory}
           onAssign={assignToCategory}
@@ -143,11 +155,19 @@ export default function SubscriptionsSection({
       </div>
 
       <div
-        className={`sidebar-resizer${isResizing.current ? ' active' : ''}`}
+        className={`sidebar-resizer${resizing ? ' active' : ''}`}
         onMouseDown={handleMouseDown}
       />
 
-      <SubscriptionList confirm={confirm} />
+      <SubscriptionList confirm={confirm} activeChannelId={activeChannel?.id ?? null} onShowVideos={handleShowVideos} />
+
+      {activeChannel && (
+        <ChannelVideosColumn
+          channelId={activeChannel.id}
+          channelTitle={activeChannel.title}
+          onClose={() => setActiveChannel(null)}
+        />
+      )}
 
       {showCategoryModal && (
         <CategoryModal

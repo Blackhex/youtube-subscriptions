@@ -135,3 +135,75 @@ python manage.py test subscriptions
 python manage.py test subscriptions.tests.test_models
 python manage.py test subscriptions.tests.test_views_feeds -v 2
 ```
+
+## Testing On-Demand ("Lazy") Sync
+
+### Patch where the name lives, not where it is used, for function-local imports
+`ChannelVideosView.get` does `from .sync import is_sync_running, sync_channel_videos_now`
+*inside the method body*. The lookup happens on every request, so there is never a
+`subscriptions.views.sync_channel_videos_now` attribute to patch — `patch` would raise
+`AttributeError`. Patch the definition module instead:
+```python
+@patch('subscriptions.sync.is_sync_running', return_value=False)
+@patch('subscriptions.sync.sync_channel_videos_now')
+def test_triggers_sync_when_never_synced(self, mock_sync, mock_running):
+```
+This is the opposite of the usual "patch where it's used" rule, which only applies to
+module-level `from x import y` bindings.
+
+### Simulate the sync's side effect, not just its return value
+A lazy-sync endpoint reads the DB *after* calling the sync, so a bare `MagicMock()` proves
+nothing about the response. Give the mock a `side_effect` that creates the rows:
+```python
+mock_sync.side_effect = lambda channel_id: self._create_videos(channel_id, 'v1', 'v2')
+```
+Then assert the new videos appear in `items` — that is what actually verifies ordering.
+
+### Always guard the "sync raised" path
+The endpoint wraps the call in `try/except Exception`. Test it with
+`side_effect=RuntimeError(...)` and assert **both** HTTP 200 and the full key set
+(`{'items', 'total', 'page', 'per_page', 'has_more'}`). Asserting only the status code
+lets a regression that returns a bare `{}` slip through. This is the highest-value test
+in the group: without it the channel view 500s whenever YouTube is down or the OAuth
+token has expired.
+
+### Snapshot module-level mutable state with a mixin + addCleanup
+`subscriptions.sync._sync_state` is a module-level dict shared by every test in the
+process, so a test that bumps `processed` leaks into whatever runs next. Restore it:
+```python
+class SyncStateSnapshotMixin:
+    def _snapshot_sync_state(self):
+        with _sync_lock:
+            original = dict(_sync_state)
+        self.addCleanup(self._restore_sync_state, original)
+
+    @staticmethod
+    def _restore_sync_state(original):
+        with _sync_lock:
+            _sync_state.clear()
+            _sync_state.update(original)
+```
+Call `self._snapshot_sync_state()` first in `setUp()`, then seed the counters the test
+needs. `clear() + update()` rather than rebinding, because callers hold a reference to
+the same dict object. Verify with `python manage.py test subscriptions --shuffle`.
+
+### Assert "no state change" by comparing whole snapshots
+For a function documented as *not* touching global state (`sync_channel_videos_now`),
+seed non-zero, non-default counters first, then compare the entire dict:
+```python
+_sync_state.update({'processed': 7, 'skipped': 2, 'fetched_new': 11,
+                    'current_channel': 'Untouched'})
+before = get_sync_state()
+sync_channel_videos_now("UC_x")
+self.assertEqual(get_sync_state(), before)
+```
+Seeding non-zero values matters: against a zeroed dict an accidental `+= 0` is invisible,
+and a full-dict comparison catches fields you did not think to assert individually.
+
+### Table-drive outcome enums with one patch per outcome
+For a dispatcher like `_sync_single_channel` that branches on a `(count, outcome)` tuple,
+patch the collaborator to return each outcome in turn and assert the deltas separately.
+Keep `missing` (no counters move at all) distinct from `no_uploads` (`processed` only) —
+they are the pair most likely to be conflated by a refactor.
+
+

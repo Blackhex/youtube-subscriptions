@@ -6,9 +6,12 @@ from django.utils import timezone
 
 from subscriptions.models import Category, Feed, Subscription, SubscriptionCategory, Video
 from subscriptions.sync import (
+    _fetch_channel_videos,
     _get_channels_to_sync,
+    _sync_single_channel,
     get_sync_state,
     is_sync_running,
+    sync_channel_videos_now,
     sync_videos_phase,
     _sync_state,
     _sync_lock,
@@ -111,3 +114,196 @@ class SyncVideosPhaseTest(TestCase):
 
         # fetch_watch_history should NOT be called (removed)
         mock_yt.fetch_watch_history.assert_not_called()
+
+
+class SyncStateSnapshotMixin:
+    """_sync_state is a module-level mutable dict; restore it around every test."""
+
+    def _snapshot_sync_state(self):
+        with _sync_lock:
+            original = dict(_sync_state)
+        self.addCleanup(self._restore_sync_state, original)
+
+    @staticmethod
+    def _restore_sync_state(original):
+        with _sync_lock:
+            _sync_state.clear()
+            _sync_state.update(original)
+
+
+class SyncSingleChannelStateTest(SyncStateSnapshotMixin, TestCase):
+    """_sync_single_channel applies the right _sync_state deltas per outcome."""
+
+    def setUp(self):
+        self._snapshot_sync_state()
+        self.sub = Subscription.objects.create(
+            channel_id="UC_single", channel_title="Single Channel",
+        )
+        with _sync_lock:
+            _sync_state.update({
+                'processed': 0,
+                'skipped': 0,
+                'fetched_new': 0,
+                'current_channel': None,
+            })
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(0, 'missing'))
+    def test_missing_outcome_leaves_counters_untouched(self, mock_fetch):
+        result = _sync_single_channel(MagicMock(), "UC_single", False)
+
+        self.assertEqual(result, 0)
+        state = get_sync_state()
+        self.assertEqual(state['processed'], 0)
+        self.assertEqual(state['skipped'], 0)
+        self.assertEqual(state['fetched_new'], 0)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(0, 'skipped'))
+    def test_skipped_outcome_increments_skipped_and_processed(self, mock_fetch):
+        result = _sync_single_channel(MagicMock(), "UC_single", False)
+
+        self.assertEqual(result, 0)
+        state = get_sync_state()
+        self.assertEqual(state['skipped'], 1)
+        self.assertEqual(state['processed'], 1)
+        self.assertEqual(state['fetched_new'], 0)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(0, 'no_uploads'))
+    def test_no_uploads_outcome_increments_processed_only(self, mock_fetch):
+        result = _sync_single_channel(MagicMock(), "UC_single", False)
+
+        self.assertEqual(result, 0)
+        state = get_sync_state()
+        self.assertEqual(state['processed'], 1)
+        self.assertEqual(state['skipped'], 0)
+        self.assertEqual(state['fetched_new'], 0)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(3, 'synced'))
+    def test_synced_outcome_adds_new_count_and_processed(self, mock_fetch):
+        result = _sync_single_channel(MagicMock(), "UC_single", False)
+
+        self.assertEqual(result, 3)
+        state = get_sync_state()
+        self.assertEqual(state['fetched_new'], 3)
+        self.assertEqual(state['processed'], 1)
+        self.assertEqual(state['skipped'], 0)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(1, 'synced'))
+    def test_sets_current_channel_to_channel_title(self, mock_fetch):
+        _sync_single_channel(MagicMock(), "UC_single", False)
+
+        self.assertEqual(get_sync_state()['current_channel'], "Single Channel")
+
+
+class SyncChannelVideosNowTest(SyncStateSnapshotMixin, TestCase):
+    """sync_channel_videos_now is the on-demand path and must not touch _sync_state."""
+
+    def setUp(self):
+        self._snapshot_sync_state()
+        self.sub = Subscription.objects.create(
+            channel_id="UC_ondemand", channel_title="On Demand Channel",
+        )
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(4, 'synced'))
+    @patch('subscriptions.sync.YouTubeService')
+    def test_returns_new_video_count(self, mock_service, mock_fetch):
+        self.assertEqual(sync_channel_videos_now("UC_ondemand"), 4)
+        mock_fetch.assert_called_once_with(
+            mock_service.return_value.credentials, "UC_ondemand", False
+        )
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(4, 'synced'))
+    @patch('subscriptions.sync.YouTubeService')
+    def test_leaves_sync_state_unchanged(self, mock_service, mock_fetch):
+        with _sync_lock:
+            _sync_state.update({
+                'processed': 7,
+                'skipped': 2,
+                'fetched_new': 11,
+                'current_channel': 'Untouched',
+            })
+        before = get_sync_state()
+
+        sync_channel_videos_now("UC_ondemand")
+
+        self.assertEqual(get_sync_state(), before)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(0, 'skipped'))
+    @patch('subscriptions.sync.YouTubeService')
+    def test_skipped_outcome_also_leaves_sync_state_unchanged(self, mock_service, mock_fetch):
+        before = get_sync_state()
+
+        self.assertEqual(sync_channel_videos_now("UC_ondemand"), 0)
+
+        self.assertEqual(get_sync_state(), before)
+
+    @patch('subscriptions.sync._fetch_channel_videos', return_value=(0, 'synced'))
+    @patch('subscriptions.sync.YouTubeService')
+    def test_force_flag_is_forwarded(self, mock_service, mock_fetch):
+        sync_channel_videos_now("UC_ondemand", force=True)
+
+        self.assertEqual(mock_fetch.call_args[0][2], True)
+
+
+class FetchChannelVideosTest(SyncStateSnapshotMixin, TestCase):
+    def setUp(self):
+        self._snapshot_sync_state()
+        self.sub = Subscription.objects.create(
+            channel_id="UC_fetch", channel_title="Fetch Channel",
+        )
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_unknown_channel_returns_missing_without_raising(self, mock_service):
+        count, outcome = _fetch_channel_videos(MagicMock(), "UC_does_not_exist", False)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(outcome, 'missing')
+        # No YouTube calls should have been made for an unknown channel
+        mock_service.from_credentials.return_value.fetch_channel_details.assert_not_called()
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_recently_synced_channel_returns_skipped(self, mock_service):
+        self.sub.videos_synced_at = timezone.now() - timedelta(minutes=1)
+        self.sub.save(update_fields=['videos_synced_at'])
+
+        count, outcome = _fetch_channel_videos(MagicMock(), "UC_fetch", False)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(outcome, 'skipped')
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_channel_without_uploads_playlist_returns_no_uploads(self, mock_service):
+        mock_service.from_credentials.return_value.fetch_channel_details.return_value = {}
+
+        count, outcome = _fetch_channel_videos(MagicMock(), "UC_fetch", False)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(outcome, 'no_uploads')
+        self.sub.refresh_from_db()
+        self.assertIsNotNone(self.sub.videos_synced_at)
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_synced_outcome_creates_videos_and_stamps_subscription(self, mock_service):
+        yt = mock_service.from_credentials.return_value
+        yt.fetch_channel_details.return_value = {
+            "UC_fetch": {'uploads_playlist_id': 'UU_fetch'},
+        }
+        yt.fetch_uploads.return_value = [
+            {
+                'video_id': 'vid_new1',
+                'title': 'New Video 1',
+                'published_at': timezone.now(),
+                'thumbnail_url': 'https://example.com/1.jpg',
+            },
+        ]
+        yt.fetch_video_details.return_value = {
+            'vid_new1': {'duration_seconds': 120, 'video_type': 'video'},
+        }
+
+        count, outcome = _fetch_channel_videos(MagicMock(), "UC_fetch", False)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(outcome, 'synced')
+        self.assertTrue(Video.objects.filter(video_id='vid_new1').exists())
+        self.sub.refresh_from_db()
+        self.assertIsNotNone(self.sub.videos_synced_at)
+

@@ -58,6 +58,20 @@ export function useCategories() {
     }
   }, [dispatch, fetchCategories]);
 
+  const moveCategory = useCallback(async (
+    categoryId: number,
+    newParentId: number | null,
+    newSiblingOrder: number[]
+  ) => {
+    try {
+      await api.updateCategory(categoryId, { parent_id: newParentId });
+      await api.reorderCategories(newParentId, newSiblingOrder);
+      await fetchCategories();
+    } catch (err) {
+      dispatch({ type: 'SHOW_TOAST', message: 'Failed to move category', toastType: 'error' });
+    }
+  }, [dispatch, fetchCategories]);
+
   const exportCategories = useCallback(async () => {
     try {
       const res = await api.exportCategories();
@@ -101,6 +115,7 @@ export function useCategories() {
     updateCategory,
     deleteCategory,
     reorderCategories,
+    moveCategory,
     exportCategories,
     importCategories,
     selectCategory,

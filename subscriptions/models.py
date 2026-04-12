@@ -33,6 +33,9 @@ class Subscription(models.Model):
     last_published_at = models.CharField(max_length=64, blank=True, null=True)
     synced_at = models.DateTimeField(blank=True, null=True)
     videos_synced_at = models.DateTimeField(blank=True, null=True)
+    # Resume point for the backwards walk through the uploads playlist; None means start over
+    uploads_page_token = models.CharField(max_length=256, blank=True, null=True)
+    uploads_backfilled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     categories = models.ManyToManyField(Category, through='SubscriptionCategory', blank=True)
 

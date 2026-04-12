@@ -1,7 +1,10 @@
+from unittest.mock import patch
+
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from subscriptions.models import Category, Subscription, SubscriptionCategory
+from subscriptions.models import Category, Subscription, SubscriptionCategory, Video
 
 
 class SubscriptionListTest(TestCase):
@@ -115,3 +118,100 @@ class SubscriptionUnassignTest(TestCase):
     def test_unassign_nonexistent_is_noop(self):
         resp = self.client.delete(f'/api/subscriptions/{self.sub.id}/unassign/99999/')
         self.assertEqual(resp.status_code, 200)
+
+
+class ChannelVideosLazySyncTest(TestCase):
+    """GET /api/subscriptions/{channel_id}/videos/ triggers on-demand sync on first view."""
+
+    URL = '/api/subscriptions/UC_lazy/videos/'
+
+    def setUp(self):
+        self.client = APIClient()
+        self.sub = Subscription.objects.create(
+            channel_id="UC_lazy", channel_title="Lazy Channel",
+        )
+
+    def _create_videos(self, channel_id, *video_ids):
+        for i, video_id in enumerate(video_ids):
+            Video.objects.create(
+                video_id=video_id,
+                channel_id=channel_id,
+                title=f"Video {i}",
+                published_at=timezone.now(),
+            )
+
+    @patch('subscriptions.sync.is_sync_running', return_value=False)
+    @patch('subscriptions.sync.sync_channel_videos_now')
+    def test_triggers_sync_when_never_synced(self, mock_sync, mock_running):
+        mock_sync.side_effect = lambda channel_id: self._create_videos(
+            channel_id, 'vid_lazy1', 'vid_lazy2'
+        )
+
+        resp = self.client.get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_called_once_with("UC_lazy")
+        data = resp.json()
+        self.assertEqual(data['total'], 2)
+        self.assertEqual(
+            {item['video_id'] for item in data['items']},
+            {'vid_lazy1', 'vid_lazy2'},
+        )
+
+    @patch('subscriptions.sync.is_sync_running', return_value=False)
+    @patch('subscriptions.sync.sync_channel_videos_now')
+    def test_no_sync_when_already_synced(self, mock_sync, mock_running):
+        self.sub.videos_synced_at = timezone.now()
+        self.sub.save(update_fields=['videos_synced_at'])
+
+        resp = self.client.get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_not_called()
+
+    @patch('subscriptions.sync.is_sync_running', return_value=False)
+    @patch('subscriptions.sync.sync_channel_videos_now')
+    def test_no_sync_on_page_2(self, mock_sync, mock_running):
+        resp = self.client.get(f'{self.URL}?page=2')
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_not_called()
+        self.assertEqual(resp.json()['page'], 2)
+
+    @patch('subscriptions.sync.is_sync_running', return_value=True)
+    @patch('subscriptions.sync.sync_channel_videos_now')
+    def test_no_sync_while_background_sync_running(self, mock_sync, mock_running):
+        resp = self.client.get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_not_called()
+
+    @patch('subscriptions.sync.is_sync_running', return_value=False)
+    @patch('subscriptions.sync.sync_channel_videos_now')
+    def test_no_sync_and_empty_list_for_unknown_channel(self, mock_sync, mock_running):
+        resp = self.client.get('/api/subscriptions/UC_unknown/videos/')
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_not_called()
+        data = resp.json()
+        self.assertEqual(data['items'], [])
+        self.assertEqual(data['total'], 0)
+        self.assertFalse(data['has_more'])
+
+    @patch('subscriptions.sync.is_sync_running', return_value=False)
+    @patch('subscriptions.sync.sync_channel_videos_now',
+           side_effect=RuntimeError("YouTube unavailable"))
+    def test_sync_failure_still_returns_normal_response(self, mock_sync, mock_running):
+        self._create_videos("UC_lazy", 'vid_existing')
+
+        resp = self.client.get(self.URL)
+
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_called_once_with("UC_lazy")
+        data = resp.json()
+        self.assertEqual(
+            set(data.keys()), {'items', 'total', 'page', 'per_page', 'has_more'}
+        )
+        self.assertEqual(data['total'], 1)
+        self.assertEqual(data['items'][0]['video_id'], 'vid_existing')
+
