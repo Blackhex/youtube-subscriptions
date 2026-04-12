@@ -5,12 +5,14 @@
 The application is a **React single-page app (SPA)** with three main sections managed via component-level routing (or simple state toggle). The layout uses Bootstrap 5 with Material UI icons, full-viewport height, no page scrolling (internal scrolling containers instead).
 
 ### Navigation Bar
-- Fixed at top, dark purple background (`--md-primary: #667eea`)
+- Fixed at top, white background in light mode / dark (`#0f0f0f`) in dark mode — matches YouTube's top bar
+- Bottom border separates navbar from content
 - Left: Tab navigation pills (Feeds, Playlists, Subscriptions) — React state toggles visible section
-- Right: Context-sensitive action buttons (icon-only, 32px circular)
-  - **Feeds section**: New Feed (`NoteAdd`), Sync (`Sync`)
-  - **Subscriptions section**: New Category (`CreateNewFolder`), AI Suggestions (`AutoAwesome`), Export (`FileUpload`), Import (`FileDownload`), Sync (`Sync`)
-  - **Playlists section**: Sync (`Sync`)
+- Right: Context-sensitive action buttons (icon-only, 32px circular, dark icons in light / light icons in dark)
+  - **All sections**: Theme toggle (`DarkMode`/`LightMode`), Sync (`Sync`)
+  - **Feeds section**: New Feed (`NoteAdd`)
+  - **Subscriptions section**: New Category (`CreateNewFolder`), AI Suggestions (`AutoAwesome`), Export (`FileUpload`), Import (`FileDownload`)
+  - **Playlists section**: (no additional buttons)
 
 ### Screenshot: Feeds Section (Empty State)
 
@@ -31,18 +33,46 @@ A horizontal column layout. Each owned YouTube playlist is a `<PlaylistColumn>` 
 ## 2. Design System
 
 ### Color Palette (CSS custom properties in `app.css`)
+
+**Light Theme (default)** — matches YouTube's light mode:
 ```css
---md-primary:      #667eea   /* Purple - primary brand color */
---md-primary-dark:  #5568d3   /* Darker purple - hover state */
---md-success:      #48bb78   /* Green - success toasts */
---md-danger:       #f56565   /* Red - error/delete actions */
-Background:        #f5f5f5   /* Light gray page background */
-Card background:   white
-Card border:       none (subtle box-shadow: 0 1px 3px rgba(0,0,0,0.08))
-Text primary:      #333
-Text secondary:    #666
-Text meta:         #999
+--md-primary:      #0f0f0f   /* Neutral dark - chips, badges, active states, action icons */
+--md-primary-dark:  #030303   /* Darker on hover */
+--md-success:      #2ba640   /* YouTube green */
+--md-danger:       #cc0000   /* YouTube red - brand accent + destructive actions */
+--md-bg:           #f2f2f2   /* YouTube light gray background */
+--md-card-bg:      #ffffff   /* White card background */
+--md-text-primary: #0f0f0f   /* YouTube near-black text */
+--md-text-secondary: #606060
+--md-text-meta:    #909090
+--md-border:       #e5e5e5
+--md-hover-bg:     rgba(0,0,0,0.05)
+--md-shadow:       0 1px 2px rgba(0,0,0,0.1)
+--md-on-primary:   #ffffff   /* Text color on primary backgrounds */
+--md-info:         #065fd4   /* Blue - only for informational toasts */
 ```
+
+**Dark Theme** (`[data-theme="dark"]`) — matches YouTube's dark mode:
+```css
+--md-primary:      #f1f1f1   /* Neutral light - chips, badges, active states, action icons */
+--md-primary-dark:  #ffffff   /* Brighter on hover */
+--md-success:      #2ba640
+--md-danger:       #ff4e45   /* Lighter red for dark bg */
+--md-bg:           #0f0f0f   /* YouTube dark background */
+--md-card-bg:      #272727   /* YouTube dark surface */
+--md-text-primary: #f1f1f1
+--md-text-secondary: #aaaaaa
+--md-text-meta:    #717171
+--md-border:       #3f3f3f
+--md-hover-bg:     rgba(255,255,255,0.1)
+--md-shadow:       none
+--md-on-primary:   #0f0f0f   /* Dark text on light primary backgrounds */
+--md-info:         #3ea6ff   /* Blue - only for informational toasts */
+```
+
+YouTube's design is neutral/monochromatic — `--md-primary` is NOT a brand color but a neutral dark/light tone used for chips, tags, badges, and interactive elements. Red (`--md-danger`) doubles as the brand accent.
+
+Theme is managed by `useTheme()` hook, persisted to `localStorage`, and defaults to the user's OS preference (`prefers-color-scheme`). Theme is applied via `data-theme` attribute on `<html>`. An inline script in `index.html` prevents a flash of wrong theme on load.
 
 ### Typography
 - Base font size: `0.875rem` (14px)
@@ -297,6 +327,7 @@ AppContext (React Context + useReducer)
 | `useQueue()` | Add/remove/reorder, create playlist |
 | `usePlaylists()` | Fetch playlists + items, reorder, delete |
 | `useSync()` | Trigger sync, poll status, update UI |
+| `useTheme()` | Toggle light/dark theme, persist to localStorage, respect OS preference |
 | `useCast()` | Cast SDK, session management, Lounge playback |
 | `useToast()` | Toast notification state and display |
 | `useConfirm()` | Promise-based confirmation dialog |

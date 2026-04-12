@@ -1,6 +1,7 @@
-import { Sync, NoteAdd, CreateNewFolder, AutoAwesome, FileUpload, FileDownload } from '@mui/icons-material';
+import { Sync, NoteAdd, CreateNewFolder, AutoAwesome, FileUpload, FileDownload, DarkMode, LightMode } from '@mui/icons-material';
 import { useAppContext } from '../../context/AppContext';
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useTheme } from '../../hooks/useTheme';
 import * as api from '../../api/client';
 
 interface NavbarProps {
@@ -15,6 +16,7 @@ interface NavbarProps {
 export default function Navbar({ onNewFeed, onNewCategory, onAISuggestions, onExport, onImport, onSync }: NavbarProps) {
   const { state, dispatch } = useAppContext();
   const { activeSection, syncState } = state;
+  const { theme, toggleTheme } = useTheme();
 
   const [oauthStatus, setOauthStatus] = useState<{
     authenticated: boolean;
@@ -70,7 +72,7 @@ export default function Navbar({ onNewFeed, onNewCategory, onAISuggestions, onEx
         authPollRef.current = null;
       }
     };
-  }, [oauthStatus.in_progress, dispatch]);
+  }, [oauthStatus.in_progress, dispatch, onSync]);
 
   // Smart sync click handler
   const handleSyncClick = useCallback(async () => {
@@ -114,7 +116,7 @@ export default function Navbar({ onNewFeed, onNewCategory, onAISuggestions, onEx
     : 'Sync with YouTube';
 
   return (
-    <nav className="navbar navbar-dark navbar--top">
+    <nav className="navbar navbar--top">
       <div className="d-flex align-items-center gap-2 w-100 px-3 py-2">
         <ul className="nav nav-pills me-auto">
           {sections.map((s) => (
@@ -130,6 +132,10 @@ export default function Navbar({ onNewFeed, onNewCategory, onAISuggestions, onEx
         </ul>
 
         <div className="d-flex align-items-center gap-1">
+          <button className="btn-icon" title={theme === 'light' ? 'Dark mode' : 'Light mode'} aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'} onClick={toggleTheme}>
+            {theme === 'light' ? <DarkMode fontSize="small" /> : <LightMode fontSize="small" />}
+          </button>
+
           {activeSection === 'feeds' && (
             <button className="btn-icon" title="New Feed" onClick={onNewFeed}>
               <NoteAdd fontSize="small" />
@@ -161,7 +167,7 @@ export default function Navbar({ onNewFeed, onNewCategory, onAISuggestions, onEx
           >
             <Sync fontSize="small"
               className={isBusy ? 'spin-icon' : ''}
-              style={!oauthStatus.authenticated ? { color: '#999' } : undefined}
+              style={!oauthStatus.authenticated ? { color: 'var(--md-text-meta)' } : undefined}
             />
           </button>
         </div>

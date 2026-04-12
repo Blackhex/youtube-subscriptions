@@ -60,6 +60,7 @@ description: "React frontend implementation for YouTube Subscriptions Organizer.
 | `useQueue()` | Add/remove/reorder, create playlist |
 | `usePlaylists()` | Fetch playlists + items, reorder, delete |
 | `useSync()` | Trigger sync, poll status every 2s, return syncState |
+| `useTheme()` | Toggle light/dark theme, persist to localStorage, respect `prefers-color-scheme` |
 | `useCast()` | Cast SDK init, session management, MDX, Lounge playback |
 | `useInfiniteScroll()` | IntersectionObserver-based pagination trigger |
 

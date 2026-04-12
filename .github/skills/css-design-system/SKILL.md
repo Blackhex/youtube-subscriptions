@@ -16,15 +16,80 @@ description: "CSS design system and styling for YouTube Subscriptions Organizer.
 - **Documentation**: See [README](../../../docs/README.md) for the documentation index
 
 ## Color Palette (CSS Custom Properties)
+
+YouTube's design is neutral/monochromatic — `--md-primary` is a neutral dark/light tone (NOT blue), used for chips, tags, badges, and interactive elements. Red (`--md-danger`) is the brand accent. Blue (`--md-info`) is only for informational toasts.
+
+### Light Theme (`:root`)
 ```css
---md-primary:       #667eea;  /* Purple - brand color */
---md-primary-dark:  #5568d3;  /* Darker purple - hover */
---md-success:       #48bb78;  /* Green - success */
---md-danger:        #f56565;  /* Red - error/delete */
+--md-primary:       #0f0f0f;  /* Neutral dark - chips, badges, actions */
+--md-primary-dark:  #030303;  /* Darker on hover */
+--md-success:       #2ba640;  /* YouTube green */
+--md-danger:        #cc0000;  /* YouTube red - brand + destructive */
+--md-bg:            #f2f2f2;
+--md-card-bg:       #ffffff;
+--md-text-primary:  #0f0f0f;
+--md-text-secondary:#606060;
+--md-text-meta:     #909090;
+--md-border:        #e5e5e5;
+--md-hover-bg:      rgba(0,0,0,0.05);
+--md-scrollbar-thumb: rgba(0,0,0,0.2);
+--md-placeholder-bg:#e5e5e5;
+--md-overlay-bg:    rgba(255,255,255,0.8);
+--md-primary-tint-5:  rgba(15, 15, 15, 0.05);
+--md-primary-tint-8:  rgba(15, 15, 15, 0.08);
+--md-primary-tint-10: rgba(15, 15, 15, 0.1);
+--md-primary-tint-15: rgba(15, 15, 15, 0.15);
+--md-danger-tint-10:  rgba(204, 0, 0, 0.1);
+--md-on-primary:    #ffffff;  /* Text on primary backgrounds */
+--md-info:          #065fd4;  /* Blue - info toasts only */
+--md-navbar-bg:     #ffffff;
+--md-navbar-text:   #0f0f0f;
+--md-navbar-text-muted: #606060;
+--md-navbar-hover:  rgba(0,0,0,0.05);
+--md-navbar-active: rgba(0,0,0,0.08);
 ```
-- Background: `#f5f5f5`
-- Card background: white, no border, subtle `box-shadow: 0 1px 3px rgba(0,0,0,0.08)`
-- Text: `#333` primary, `#666` secondary, `#999` meta
+
+### Dark Theme (`[data-theme="dark"]`)
+```css
+--md-primary:       #f1f1f1;  /* Neutral light - chips, badges, actions */
+--md-primary-dark:  #ffffff;  /* Brighter on hover */
+--md-success:       #2ba640;
+--md-danger:        #ff4e45;
+--md-bg:            #0f0f0f;
+--md-card-bg:       #272727;
+--md-text-primary:  #f1f1f1;
+--md-text-secondary:#aaaaaa;
+--md-text-meta:     #717171;
+--md-border:        #3f3f3f;
+--md-hover-bg:      rgba(255,255,255,0.1);
+--md-scrollbar-thumb: rgba(255,255,255,0.2);
+--md-placeholder-bg:#3f3f3f;
+--md-overlay-bg:    rgba(0,0,0,0.8);
+--md-primary-tint-5:  rgba(241, 241, 241, 0.05);
+--md-primary-tint-8:  rgba(241, 241, 241, 0.08);
+--md-primary-tint-10: rgba(241, 241, 241, 0.1);
+--md-primary-tint-15: rgba(241, 241, 241, 0.15);
+--md-danger-tint-10:  rgba(255, 78, 69, 0.1);
+--md-on-primary:    #0f0f0f;  /* Dark text on light primary backgrounds */
+--md-info:          #3ea6ff;  /* Blue - info toasts only */
+--md-navbar-bg:     #0f0f0f;
+--md-navbar-text:   #f1f1f1;
+--md-navbar-text-muted: #aaaaaa;
+--md-navbar-hover:  rgba(255,255,255,0.1);
+--md-navbar-active: rgba(255,255,255,0.15);
+```
+
+### Theming Guidelines
+- NEVER use hardcoded colors — always use CSS variables
+- `--md-primary` is NEUTRAL (dark in light mode, light in dark mode) — NOT a brand color
+- Use `var(--md-on-primary)` for text that sits on `var(--md-primary)` backgrounds
+- Use `var(--md-info)` for informational elements that need blue
+- Use `var(--md-border)` instead of `#eee` or `#ddd` for borders
+- Use `var(--md-hover-bg)` instead of `rgba(0,0,0,0.0x)` for hover states
+- Use `var(--md-card-bg)` instead of `white` or `#fff` for card backgrounds
+- Use `var(--md-placeholder-bg)` instead of `#e0e0e0` for placeholder backgrounds
+- Dark theme component overrides go in the `[data-theme="dark"]` section at the top of app.css
+- Form inputs need explicit `background` and `color` overrides in dark theme
 
 ## Typography
 - Base: `0.875rem` (14px)
@@ -41,7 +106,7 @@ description: "CSS design system and styling for YouTube Subscriptions Organizer.
 4. Action Buttons (`btn-icon`, `btn-action`, variants)
 5. List Items (shared base for subscription/video/queue)
 6. Video-specific (thumbnail 168×94px, duration badge, progress bar, `.watched` 50% opacity)
-7. Category Tree (node, toggle, drag, collapse, selection, suggestion purple border)
+7. Category Tree (node, toggle, drag, collapse, selection, suggestion primary-colored border)
 8. Column Layout (`flex: 0 0 clamp(300px, 30vw, 500px)`, horizontal scroll)
 9. Navigation (nav pills, section visibility)
 10. Utilities (spinner, dialog, toast, filter groups)
@@ -49,10 +114,10 @@ description: "CSS design system and styling for YouTube Subscriptions Organizer.
 ## Key CSS Patterns
 
 ### Action Buttons
-- `.btn-icon`: 32px circle, white icon, transparent bg, hover shows white 20% opacity (navbar)
-- `.btn-action`: 24px square, primary icon, no border, hover 10% primary tint
+- `.btn-icon`: 32px circle, theme-adaptive text color (`--md-navbar-text`), transparent bg, hover uses `--md-navbar-hover` (navbar)
+- `.btn-action`: 24px square, primary icon, no border, hover uses `--md-primary-tint-10`
 - `.btn-action-sm`: 20px variant for category tree
-- `.btn-action-danger`: Red-colored for destructive actions
+- `.btn-action-danger`: Red-colored for destructive actions, hover uses `--md-danger-tint-10`
 - `.btn-action-reveal`: Hidden by default, shown on parent `:hover`
 
 ### Layout Utilities

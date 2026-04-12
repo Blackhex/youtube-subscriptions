@@ -14,9 +14,9 @@ export default function Toast() {
   if (!toast) return null;
 
   const bgClass =
-    toast.type === 'success' ? 'bg-success' :
-    toast.type === 'error' ? 'bg-danger' :
-    'bg-primary';
+    toast.type === 'success' ? 'toast-success' :
+    toast.type === 'error' ? 'toast-error' :
+    'toast-info';
 
   return (
     <div className="toast-container position-fixed bottom-0 end-0 p-3" style={{ zIndex: 1100 }}>

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import VideoItem, { formatDuration } from '../VideoItem';
+import VideoItem from '../VideoItem';
+import { formatDuration } from '../videoItemUtils';
 import { mockVideo } from '../../../test/helpers';
 
 describe('VideoItem', () => {
