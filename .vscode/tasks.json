@@ -111,6 +111,26 @@
       "type": "shell"
     },
     {
+      "command": "python scripts/chrome_extension.py status",
+      "label": "Extension/Check Chrome Install Status",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
+      "command": "python scripts/chrome_extension.py reload",
+      "label": "Extension/Install or Reload in Chrome",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "type": "shell"
+    },
+    {
       "command": "cd frontend && npm run build",
       "dependsOn": [
         "Install/Frontend Dependencies"

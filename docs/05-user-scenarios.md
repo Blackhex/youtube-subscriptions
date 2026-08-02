@@ -10,6 +10,7 @@
 | AI category suggestions | Subscriptions | Gemini API + heuristic fallback in `suggestions.py` | Highlight + badge via `suggestedCategoryIds` state |
 | Subscription search | Subscriptions | Server-side pagination via DRF | Client-side `useMemo` filter |
 | PocketTube import/export | Subscriptions | Export/import actions on `CategoryViewSet` | File download/upload handlers |
+| PocketTube direct sync | Subscriptions | Reuses `import_categories` action | Chrome extension popup + context menu |
 | Customizable video feeds | Feeds | `FeedViewSet` CRUD + filtered video query | `<FeedColumn>` + `<FeedModal>` |
 | Video play queue | Feeds | Queue views + Lounge API | `<QueueColumn>` with `@dnd-kit` + `useCast()` |
 | Google Cast playback | Feeds | Lounge bind/setPlaylist/nowPlaying | Cast SDK + MDX via `useCast()` hook |
@@ -58,18 +59,59 @@
 1. User navigates to Subscriptions section
 2. Clicks Import button (`FileDownload` icon) in `<Navbar>` action buttons
 3. Hidden `<input type="file">` triggered, user selects PocketTube JSON file
-4. `<ConfirmDialog>`: "Import categories from this file?"
+4. `<ConfirmDialog>` ("Replace Categories") spells out the consequences: every category and assignment is deleted and rebuilt from the file, subscriptions/videos/queue are kept, feed filters are remapped, the database is snapshotted first
 5. User confirms
-6. React sends `POST /api/categories/import/` with `FormData`
+6. React sends `POST /api/categories/import/` with `FormData` carrying `file` and an explicit `mode=replace`
 7. Django backend processes file:
+   - Snapshots the database into `data/db-backups/`, then deletes every `Category` and `SubscriptionCategory`
    - Creates categories from JSON keys (auto-detects hierarchy from `ysc_settings.sub_groups`)
    - Creates missing subscriptions from `ysc_channel_metadata`
    - Assigns subscriptions to matching categories by channel ID
+   - Remaps `Feed.filter_category_ids` old id → name → new id
    - Saves PocketTube metadata (subscriber counts, topics, channel health)
-8. Toast: "Import complete: 25 new categories, 120 new subscriptions, 850 assignments"
+8. Toast: "Import complete — 43 categories and 2325 assignments deleted, 43 categories and 2325 assignments created"
 9. `useCategories()` hook refetches → `<CategoryTree>` re-renders with new structure
 
-**Expected Result:** Complete PocketTube data is imported, including hierarchy, assignments, and metadata.
+**Expected Result:** The app's categorization mirrors the file exactly, including hierarchy, assignments, and metadata. Categories that are not in the file are gone.
+
+---
+
+### Scenario 2b: Syncing Categories Directly from PocketTube (Chrome Extension)
+
+**Precondition:** The "YouTube Subscriptions Helper" extension and PocketTube's YouTube Subscription Manager are loaded. Live needs a reachable youtube.com tab and no paid plan; Cloud needs a **paid** PocketTube subscription (Patreon or Paddle), saved credentials and at least one snapshot. No file export is needed.
+
+**Steps:**
+1. Once: user reads their PocketTube credentials (PocketTube options page → DevTools → `chrome.storage.local.get(["patreon","yu"], console.log)`) and saves them on the extension's **options page** (popup → "Settings", or chrome://extensions → Details → Extension options), together with the app origin, the import source and the import mode
+2. User clicks the extension's toolbar icon (or right-clicks it → "Preview categories from PocketTube backup")
+3. The popup **previews automatically as it opens**, using the stored settings — there is no first click
+4. Service worker POSTs the credential form to `https://p.yousub.info/backup/list` and picks the newest backup id (ids are unix timestamps)
+5. Worker POSTs the same form plus that `id` to `https://p.yousub.info/backup/download` and parses `data` — the full PocketTube storage dump, in the same flat format the backend already imports
+6. Worker also `GET`s `{appOrigin}/api/categories/` and compares it with the backup, so the preview can quantify the removals
+7. Popup shows the preview: source, the snapshot's date/time, category / channel / assignment counts, the first category names, the removal forecast and any warnings. A cloud run also gets a snapshot picker; changing it re-previews and re-arms the button with the new one-shot token
+8. A successful cloud preview labels the first choice "newest cloud snapshot", explains that cloud is scheduled and may be up to a day old, and offers **Use current live data**. That action persists Live, discards the cloud token and performs a fresh Live preview; it does not import
+9. The single primary button says what it would do ("Import 48 categories (replace)"). One click commits the previewed payload — unless the preview is destructive or suspicious (`existing.removed > 0`, `existing.ok !== true`, or a zero-assignment / oversized / stale-backup warning), in which case a confirmation panel naming the reason has to be accepted first. The note under the button always says which case applies
+10. Worker POSTs the *cached* preview JSON plus an explicit `mode` field as `multipart/form-data` to `POST /api/categories/import/`
+11. Popup shows the backend result: mode, deleted categories/assignments, created categories, created subscriptions, assignments added, unmatched channels
+
+**Expected Result:** The app's categorization mirrors the source the user previewed and explicitly imported: current PocketTube state for Live, or the chosen cloud snapshot for Cloud. In additive mode nothing is deleted.
+
+**Failure modes** (each reports a specific message, never a generic failure):
+- No credentials stored, or incomplete → message explains exactly how to extract them
+- HTTP 401/403 from the backup API → "credentials rejected or expired, re-extract them"
+- No cloud backups on the account, or a non-JSON reply (free plan) → nothing is imported
+- Downloaded JSON is not a PocketTube storage dump → refused before any import
+- Backup older than 7 days → preview warns, and that warning alone forces the extra confirmation click
+- App origin outside the allow-list → refused on the options page as it is typed, and again by the worker before any request
+- `GET /api/categories/` unreachable → the preview and the import still work; the preview says the removal count could not be determined instead of implying zero, and that alone forces the extra confirmation click
+
+**Notes:**
+- Google Drive is not involved, and neither is PocketTube's youtube.com page message bus — Architecture Overview §4.8 documents why every other route is closed.
+- The downloaded dump carries PocketTube's own secrets (`patreon`, `yu`, `ysc_token_google`, nested token-like fields). These are silently stripped before anything is sent to the app; dynamic category/channel names remain intact even when they resemble credential field names.
+- PocketTube may leave the exact malformed value `https://www.youtube.com/` in category arrays. The worker removes only that exact entry from recognized categories before counting, previewing or importing it; similarly shaped values and non-category data remain untouched.
+- The context-menu entry deliberately runs a **preview only**; because replace mode deletes every category and assignment and the import is irreversible, a right-click cannot commit data. Its result is handed to the popup without a token, so the popup shows it but still re-reads before it sends anything.
+- The **live** source is the one that cannot always auto-preview: reading it opens a youtube.com tab when none is open. With no such tab the popup shows a ready state saying so, and the single click does preview-then-commit in one go, still applying the confirmation gate.
+- A successful cloud preview never claims to be current PocketTube state. The explicit Live alternative is a preview-only source change, and late responses from the discarded source cannot re-arm its token or overwrite the newer preview.
+- The confirm step commits the exact previewed payload via a one-shot token, so what is imported is what was shown.
 
 ---
 

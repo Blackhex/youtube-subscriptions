@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<!-- Extension popup — TWO views in ONE document. The run view is a status line,
+     the dry-run checkbox and the single sync button; the settings view holds the
+     app origin, the import source, the cloud backup picker, the import mode and
+     the PocketTube credentials. The header button swaps between them, so nothing
+     here ever opens a tab. The popup previews the moment it opens, so the numbers
+     are already on screen before the primary button can be pressed.
+     Static copy is deliberately terse: anything that does not fit on one short
+     line lives in a title= tooltip or in the service-worker console, and the
+     replace-mode deletion warning is stated in exactly one place — the
+     confirmation panel, where it is explicit and must stay that way. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Subscriptions Helper</title>
+  <style>
+    :root {
+      --md-primary: #1565c0;
+      --md-primary-dark: #0d47a1;
+      --md-surface: #ffffff;
+      --md-border: #dadce0;
+      --md-text: #202124;
+      --md-muted: #5f6368;
+      --md-error: #c62828;
+      --md-success: #2e7d32;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      width: 360px;
+      font-family: 'Roboto', 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      color: var(--md-text);
+      background: var(--md-surface);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px 10px 16px;
+      background: var(--md-primary);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    #open-settings {
+      width: auto;
+      flex: 0 0 auto;
+      padding: 4px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 4px;
+      background: transparent;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 500;
+      box-shadow: none;
+    }
+
+    #open-settings:hover { background: rgba(255, 255, 255, 0.16); }
+
+    main { padding: 14px 16px 16px; }
+
+    label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--md-muted);
+      margin-bottom: 4px;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="email"],
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--md-border);
+      border-radius: 4px;
+      font: inherit;
+      color: var(--md-text);
+      background: var(--md-surface);
+    }
+
+    input:focus,
+    select:focus {
+      outline: none;
+      border-color: var(--md-primary);
+    }
+
+    .field { margin-bottom: 12px; }
+
+    .origin-row {
+      display: flex;
+      align-items: stretch;
+      gap: 6px;
+    }
+
+    .origin-row input { min-width: 0; }
+
+    .origin-row button {
+      width: auto;
+      flex: 0 0 auto;
+      padding: 8px 12px;
+      box-shadow: none;
+    }
+
+    fieldset {
+      margin: 0 0 12px;
+      padding: 10px 12px 12px;
+      border: 1px solid var(--md-border);
+      border-radius: 4px;
+    }
+
+    legend {
+      padding: 0 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--md-muted);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .token-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .token-row button {
+      width: auto;
+      flex: 0 0 auto;
+      padding: 0 12px;
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    #primary-note {
+      margin: 6px 0 0;
+      font-size: 11px;
+      color: var(--md-muted);
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px 12px;
+      border: none;
+      border-radius: 4px;
+      background: var(--md-primary);
+      color: #fff;
+      font: inherit;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
+    }
+
+    button:hover:not(:disabled) { background: var(--md-primary-dark); }
+    button:disabled { background: #b0bec5; cursor: default; box-shadow: none; }
+
+    button.secondary {
+      background: #eceff1;
+      color: var(--md-text);
+      box-shadow: none;
+    }
+
+    button.secondary:hover:not(:disabled) { background: #cfd8dc; }
+
+    [hidden] { display: none !important; }
+
+    #confirm {
+      margin-top: 14px;
+      padding: 10px;
+      border: 1px solid var(--md-border);
+      border-radius: 4px;
+      background: #fffde7;
+    }
+
+    #confirm-text {
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .confirm-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    #status,
+    #settings-status {
+      margin-top: 14px;
+      padding: 10px;
+      border-radius: 4px;
+      background: #f1f3f4;
+      color: var(--md-muted);
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 18px;
+    }
+
+    #status.error,
+    #settings-status.error { background: #fdecea; color: var(--md-error); }
+
+    #status.success,
+    #settings-status.success { background: #e8f5e9; color: var(--md-success); }
+
+    #credential-state {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--md-muted);
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    #live-fallback { margin-top: 10px; }
+
+    .hint {
+      margin: 6px 0 0;
+      font-size: 11px;
+      color: var(--md-muted);
+      line-height: 1.4;
+    }
+
+    /* Overrides the uppercase block `label` rule above. */
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0 0 8px;
+      font-size: 12px;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--md-text);
+      cursor: pointer;
+    }
+
+    .check input { width: auto; margin: 0; }
+
+    .steps {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      font-size: 11px;
+      color: var(--md-muted);
+      line-height: 1.4;
+    }
+
+    .steps code {
+      display: block;
+      margin-top: 2px;
+      font-size: 10px;
+      word-break: break-all;
+    }
+
+    #settings-back { margin-top: 12px; }
+
+    #build-footer {
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px solid var(--md-border);
+      font-size: 10px;
+      color: var(--md-muted);
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    #build-warning {
+      display: block;
+      margin-top: 4px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: #fdecea;
+      color: var(--md-error);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    #build-reload { margin-top: 6px; }
+
+    #reload-extension { margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <span>YouTube Subscriptions Helper</span>
+    <button id="open-settings" type="button">Settings</button>
+  </header>
+  <main>
+    <section id="run-view">
+      <label class="check" for="dry-run" title="Preview only — never imports">
+        <input type="checkbox" id="dry-run"> Dry run
+      </label>
+      <button id="sync">Preview…</button>
+      <p id="primary-note"></p>
+
+      <div id="confirm" role="alertdialog" aria-label="Confirm category import"
+           aria-describedby="confirm-text" hidden>
+        <div id="confirm-text"></div>
+        <div class="confirm-actions">
+          <button id="confirm-send">Yes, import it</button>
+          <button id="confirm-cancel" class="secondary">Cancel</button>
+        </div>
+      </div>
+
+      <div id="status" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
+
+      <div id="live-fallback" hidden>
+        <button id="live-fallback-use-cloud" class="secondary">Use the cloud backup</button>
+        <p class="hint">Different data, up to a day old.</p>
+      </div>
+
+      <div id="build-footer">
+        <span id="build-versions"></span>
+        <span id="build-warning" hidden></span>
+        <button id="build-reload" class="secondary" type="button" hidden>Reload extension</button>
+      </div>
+    </section>
+
+    <section id="settings-view" hidden>
+      <form id="app-origin-form" class="field" aria-busy="false">
+        <label for="app-origin">App origin</label>
+        <p class="hint">Host access connects this origin to the cookie bridge.</p>
+        <div class="origin-row">
+          <input type="text" id="app-origin" spellcheck="false"
+                 placeholder="http://127.0.0.1:8001">
+          <button id="app-origin-save" type="submit">Apply</button>
+        </div>
+        <p class="hint">Localhost, Codespaces, or an exact remote HTTPS origin</p>
+      </form>
+
+      <div class="field">
+        <label for="import-source">Import source</label>
+        <select id="import-source" title="Neither source falls back to the other">
+          <option value="live">Live — PocketTube on a youtube.com tab</option>
+          <option value="cloud">Cloud snapshot — paid plan, may be up to a day old</option>
+        </select>
+      </div>
+
+      <div class="field" id="backup-picker" hidden>
+        <label for="backup-id">Cloud backup</label>
+        <select id="backup-id"></select>
+      </div>
+
+      <div class="field">
+        <label for="import-mode">Import mode</label>
+        <select id="import-mode">
+          <option value="replace">Replace — delete and rebuild all categories</option>
+          <option value="additive">Additive — only create what is missing</option>
+        </select>
+      </div>
+
+      <fieldset id="cred-fieldset">
+        <legend>PocketTube backup credentials</legend>
+
+        <div class="field">
+          <label for="cred-mode">Plan</label>
+          <select id="cred-mode">
+            <option value="patreon">Patreon (access token)</option>
+            <option value="paddle">Paddle (email + tokens)</option>
+          </select>
+        </div>
+
+        <div class="field" id="patreon-fields">
+          <label for="cred-access-token">Access token</label>
+          <input type="password" id="cred-access-token" autocomplete="off" spellcheck="false"
+                 placeholder="ysc_settings.patreon → access_token">
+        </div>
+
+        <div id="paddle-fields" hidden>
+          <div class="field">
+            <label for="cred-email">Email</label>
+            <input type="email" id="cred-email" autocomplete="off" spellcheck="false"
+                   placeholder="ysc_settings.yu.email">
+          </div>
+          <div class="field">
+            <label for="cred-token-0">Tokens (masked)</label>
+            <div id="cred-token-list"></div>
+            <button type="button" id="cred-token-add" class="secondary">Add token</button>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="cred-save">Save</button>
+          <button id="cred-clear" class="secondary">Clear</button>
+        </div>
+
+        <div id="credential-state"></div>
+
+        <p class="hint">Sent only to p.yousub.info. Never shown again.</p>
+
+        <ol class="steps">
+          <li title="kdmnjgijlmjgmimahnillepgcgeemffb — not the PlayList Manager">Open PocketTube Subscription Manager options.</li>
+          <li>Open DevTools there.</li>
+          <li>Run:
+            <code>chrome.storage.local.get('ysc_settings').then(d =&gt; { const p = d.ysc_settings?.patreon; console.log(p ? JSON.parse(p).access_token : d.ysc_settings?.yu); });</code>
+          </li>
+          <li>Paste what it logs above.</li>
+        </ol>
+      </fieldset>
+
+      <div id="settings-status" role="status" aria-live="polite" aria-atomic="true"></div>
+
+      <div class="field">
+        <button id="reload-extension" class="secondary" type="button"
+                title="Restarts this extension, not the page">Reload extension</button>
+      </div>
+
+      <button id="settings-back" class="secondary">Done</button>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -875,3 +875,229 @@ class CategoryImportReplaceStructureTest(ImportModeMixin, TestCase):
             .values_list('subscription__channel_id', flat=True)
         )
         self.assertEqual(assigned, {'UC_c1', 'UC_c2'})
+
+
+class CategoryImportSortOrderTest(ImportModeMixin, TestCase):
+    """sort_order comes from ysc_meta[name].position, a single global depth-first
+    sequence that orders both the roots and every sibling group."""
+
+    # Positions far apart so a sibling-count fallback would land between them
+    POSITIONED = {
+        'Music': {'position': 0},
+        'News': {'position': 12},
+        'Sports': {'position': 40},
+    }
+
+    def setUp(self):
+        self.client = APIClient()
+        self._isolate_metadata_path()
+        self._isolate_backup_dir()
+
+    def _meta_payload(self, category_keys, ysc_meta, sub_groups=None, collection=None):
+        """Category keys first so their dict order is the encounter order the import sees."""
+        payload = {key: [] for key in category_keys}
+        payload['ysc_meta'] = ysc_meta
+        if collection is not None:
+            payload['ysc_collection'] = collection
+        if sub_groups is not None:
+            payload['ysc_settings'] = {'sub_groups': sub_groups}
+        payload['ysc_channel_metadata'] = {}
+        payload['channelsHealth'] = {}
+        payload['topicCache'] = {}
+        payload['ysc_subs_count'] = {}
+        return payload
+
+    def _root_names(self):
+        return list(Category.objects.filter(parent=None).values_list('name', flat=True))
+
+    def _child_names(self, parent_name):
+        return list(
+            Category.objects.filter(parent__name=parent_name).values_list('name', flat=True)
+        )
+
+    def _assert_unusable_position_sorts_last(self, meta_entry=_OMIT):
+        meta = dict(self.POSITIONED)
+        if meta_entry is not _OMIT:
+            meta['Aardvark'] = meta_entry
+        payload = self._meta_payload(
+            ['Aardvark', 'Music', 'News', 'Sports'],
+            ysc_meta=meta,
+            # Keeps Aardvark in the category registry even when ysc_meta omits it
+            collection={'Aardvark': []},
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._root_names(), ['Music', 'News', 'Sports', 'Aardvark'])
+        self.assertEqual(Category.objects.get(name='Aardvark').sort_order, 41)
+
+    # 1. Positions drive sort_order for roots and children alike
+    def test_positions_order_roots_and_children(self):
+        payload = self._meta_payload(
+            ['Root A', 'Child A', 'Child Z', 'Root B', 'Child M'],
+            ysc_meta={
+                'Root B': {'position': 0},
+                'Child M': {'position': 1},
+                'Root A': {'position': 2},
+                'Child Z': {'position': 3},
+                'Child A': {'position': 4},
+            },
+            sub_groups={
+                'Root A': {'Child A': {}, 'Child Z': {}},
+                'Root B': {'Child M': {}},
+            },
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        # Alphabetical would be Root A first; encounter order would too
+        self.assertEqual(self._root_names(), ['Root B', 'Root A'])
+        self.assertEqual(self._child_names('Root A'), ['Child Z', 'Child A'])
+        self.assertEqual(self._child_names('Root B'), ['Child M'])
+        self.assertEqual(Category.objects.get(name='Root B').sort_order, 0)
+        self.assertEqual(Category.objects.get(name='Child A').sort_order, 4)
+
+    # 2. The real-world regression: one root's ysc_meta value is None
+    def test_real_world_none_meta_entry_sorts_last_not_second(self):
+        positions = [
+            ('Crafting', 0), ('Construction', 12), ('News', 16),
+            ('Edu & Sci & Tech', 18), ('Software', 25), ('Hardware', 35),
+            ('Sports', 40), ('Languages', 42), ('Entertainment', 46),
+            ('Elite', 48), ('Top', 49),
+        ]
+        meta = {name: {'position': pos} for name, pos in positions}
+        meta['Learning (to remove)'] = None
+        # Encountered second, which is where the old sibling-count fallback ranked it
+        keys = ['Crafting', 'Learning (to remove)'] + [n for n, _ in positions[1:]]
+        payload = self._meta_payload(keys, ysc_meta=meta)
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._root_names(), [
+            'Crafting', 'Construction', 'News', 'Edu & Sci & Tech', 'Software',
+            'Hardware', 'Sports', 'Languages', 'Entertainment', 'Elite', 'Top',
+            'Learning (to remove)',
+        ])
+        self.assertEqual(
+            Category.objects.get(name='Learning (to remove)').sort_order, 50,
+        )
+
+    # 3. Every "no usable position" variant sorts last
+    def test_name_absent_from_ysc_meta_sorts_last(self):
+        self._assert_unusable_position_sorts_last()
+
+    def test_none_meta_entry_sorts_last(self):
+        self._assert_unusable_position_sorts_last(None)
+
+    def test_non_dict_meta_entry_sorts_last(self):
+        self._assert_unusable_position_sorts_last(['not', 'a', 'dict'])
+
+    def test_meta_entry_without_position_key_sorts_last(self):
+        self._assert_unusable_position_sorts_last({'color': 'red'})
+
+    def test_string_position_sorts_last(self):
+        self._assert_unusable_position_sorts_last({'position': '3'})
+
+    def test_bool_position_sorts_last(self):
+        # bool subclasses int, so True must not be accepted as position 1
+        self._assert_unusable_position_sorts_last({'position': True})
+
+    # 4. Unpositioned categories keep encounter order, not alphabetical order
+    def test_unpositioned_categories_keep_encounter_order(self):
+        payload = self._meta_payload(
+            ['Anchor', 'Zebra', 'Alpha', 'Mango'],
+            ysc_meta={'Anchor': {'position': 3}},
+            collection={'Zebra': [], 'Alpha': [], 'Mango': []},
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        roots = self._root_names()
+        self.assertEqual(roots, ['Anchor', 'Zebra', 'Alpha', 'Mango'])
+        # Meta.ordering tie-breaks by name, so equal sort_orders would give this instead
+        self.assertNotEqual(roots, sorted(roots))
+        self.assertEqual(
+            [Category.objects.get(name=n).sort_order for n in roots], [3, 4, 5, 6],
+        )
+
+    # 5. No positions at all falls back to the sibling count
+    def test_no_positions_anywhere_uses_sibling_count_fallback(self):
+        payload = self._meta_payload(
+            ['Parent', 'Child', 'Loose'],
+            ysc_meta={'Parent': {}, 'Child': {}, 'Loose': {}},
+            sub_groups={'Parent': {'Child': {}}},
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['created_categories'], 3)
+        self.assertEqual(Category.objects.get(name='Parent').sort_order, 1)
+        self.assertEqual(Category.objects.get(name='Loose').sort_order, 2)
+        self.assertEqual(Category.objects.get(name='Child').sort_order, 1)
+        self.assertEqual(self._root_names(), ['Parent', 'Loose'])
+        self.assertEqual(self._child_names('Parent'), ['Child'])
+
+    # 6. Depth-first interleaving: parent p, children p+1..p+n, next parent p+n+1
+    def test_depth_first_positions_order_each_sibling_group(self):
+        payload = self._meta_payload(
+            ['Zeta Parent', 'Yankee', 'Xray', 'Whiskey',
+             'Alpha Parent', 'Delta', 'Charlie'],
+            ysc_meta={
+                'Zeta Parent': {'position': 5},
+                'Yankee': {'position': 6},
+                'Xray': {'position': 7},
+                'Whiskey': {'position': 8},
+                'Alpha Parent': {'position': 9},
+                'Delta': {'position': 10},
+                'Charlie': {'position': 11},
+            },
+            sub_groups={
+                'Zeta Parent': {'Yankee': {}, 'Xray': {}, 'Whiskey': {}},
+                'Alpha Parent': {'Delta': {}, 'Charlie': {}},
+            },
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._root_names(), ['Zeta Parent', 'Alpha Parent'])
+        self.assertEqual(
+            self._child_names('Zeta Parent'), ['Yankee', 'Xray', 'Whiskey'],
+        )
+        self.assertEqual(self._child_names('Alpha Parent'), ['Delta', 'Charlie'])
+
+    # 7. Additive mode must not reorder categories it did not create
+    def test_additive_leaves_existing_sort_order_untouched(self):
+        existing = Category.objects.create(name='Gaming', sort_order=99)
+        payload = self._meta_payload(
+            ['Gaming', 'Music'],
+            ysc_meta={'Gaming': {'position': 0}, 'Music': {'position': 1}},
+        )
+
+        resp = self._import(payload, mode='additive')
+
+        self.assertEqual(resp.status_code, 200)
+        existing.refresh_from_db()
+        self.assertEqual(existing.sort_order, 99)
+        self.assertEqual(Category.objects.get(name='Music').sort_order, 1)
+        self.assertEqual(self._root_names(), ['Music', 'Gaming'])
+
+    # 8. Chunked keys take their position from the base name
+    def test_chunked_keys_take_sort_order_from_base_name(self):
+        payload = self._meta_payload(
+            ['Top', 'Top_ysm_1', 'Top_ysm_2', 'Music'],
+            ysc_meta={'Top': {'position': 7}, 'Music': {'position': 9}},
+        )
+
+        resp = self._import(payload, mode='replace')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Category.objects.filter(name='Top').count(), 1)
+        self.assertFalse(Category.objects.filter(name__startswith='Top_ysm_').exists())
+        self.assertEqual(Category.objects.get(name='Top').sort_order, 7)
+        self.assertEqual(self._root_names(), ['Top', 'Music'])

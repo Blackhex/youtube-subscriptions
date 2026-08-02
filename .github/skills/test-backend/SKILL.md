@@ -261,3 +261,41 @@ Keep `missing` (no counters move at all) distinct from `no_uploads` (`processed`
 they are the pair most likely to be conflated by a refactor.
 
 
+## Testing Import Ordering (`sort_order` from `ysc_meta`)
+
+### The registry gate silently drops unlisted categories
+`import_categories` builds `registry` from the keys of `ysc_collection` **and**
+`ysc_meta`; once that set is non-empty, any list key whose base name is missing from it
+is skipped entirely. So a test for "name absent from `ysc_meta`" must still list the name
+under `ysc_collection`, or the category is never created and the assertion becomes an
+error rather than the intended ordering check.
+
+### Encounter order is payload key order
+`category_channels` is built from `data.items()`, and `json.dumps`/`json.load` preserve
+dict insertion order, so the order of category keys in the test payload *is* the encounter
+order the unpositioned counter uses. Put the category keys first in the payload dict and
+the `ysc_*` keys after, so the intent is obvious.
+
+With `ysc_settings.sub_groups` present the encounter order changes: parents and their
+children are created first in `sub_groups` order, then any leftover keys.
+
+### Empty channel lists still create categories
+`"Name": []` passes the `isinstance(value, list)` check, so ordering fixtures need no
+`ysc_channel_metadata` entries at all. This keeps a 12-root regression payload readable.
+
+### Prove a name tiebreak is not what passed
+`Category.Meta.ordering = ['sort_order', 'name']`. A bug that gives several rows the same
+`sort_order` still yields a deterministic, alphabetical order. Assert
+`assertNotEqual(names, sorted(names))` alongside the expected sequence, and pick fixture
+names whose expected order differs from both alphabetical and insertion order.
+
+### Spread positioned fixtures far apart
+A fallback that counts siblings produces small numbers (1, 2, 3 ...). If the positioned
+fixtures use 0, 1, 2 the broken value lands in the same range and the test passes either
+way. Use positions like `0, 12, 40` so the expected `max_position + 1 + k` is unmistakably
+distinct from a sibling count.
+
+### `bool` is an `int`
+Any `isinstance(x, int)` validation needs an explicit `{'position': True}` case; without
+`not isinstance(x, bool)` in the implementation, `True` is accepted as position 1.
+

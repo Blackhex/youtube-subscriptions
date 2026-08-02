@@ -49,11 +49,16 @@ DB_BACKUP_RETENTION = 5
 
 # Keys in PocketTube JSON that are not category mappings
 POCKETTUBE_INTERNAL_KEYS = {
-    'channelsHealth', 'topicCache',
+    'api_counter', 'backupExpired', 'channelsHealth', 'channelsHealthExpired',
+    'lastWatchedId', 'liveStreamsCurrent', 'nvl', 'nvlo', 'topicCache',
+    'topicCounter', 'topicExpired', 'watchedCounter', 'watchedExpired',
     'ysc_channel_metadata', 'ysc_collection', 'ysc_deck', 'ysc_meta',
     'ysc_popup', 'ysc_settings', 'ysc_subs_count', 'ysc_title_id',
     'ysc_token_google',
 }
+
+# Chunked category keys look like "Name_ysm_1"; the base name is the real category
+POCKETTUBE_CHUNK_SUFFIX_RE = re.compile(r'^(.+?)_ysm_\d+$')
 
 
 def _migrate_legacy_metadata_file():
@@ -323,6 +328,29 @@ class CategoryViewSet(ModelViewSet):
         if isinstance(ysc_settings, dict) and isinstance(ysc_settings.get('sub_groups'), dict):
             sub_groups = ysc_settings['sub_groups']  # dict: parent -> {child: {}, ...}
 
+        # PocketTube's own category registry: both maps are keyed by category name and
+        # together they tell real categories apart from internal caches (nvl, nvlo, ...)
+        registry = set()
+        for registry_key in ('ysc_collection', 'ysc_meta'):
+            registry_map = data.get(registry_key)
+            if isinstance(registry_map, dict):
+                registry.update(registry_map.keys())
+
+        # ysc_meta positions are a single global depth-first sequence, so one value
+        # orders both the root level and each sibling group correctly.
+        category_positions = {}
+        ysc_meta = data.get('ysc_meta')
+        if isinstance(ysc_meta, dict):
+            for meta_name, meta_entry in ysc_meta.items():
+                if not isinstance(meta_entry, dict):
+                    continue
+                position = meta_entry.get('position')
+                if isinstance(position, int) and not isinstance(position, bool):
+                    category_positions[meta_name] = position
+        # Categories without a position go after every positioned one instead of
+        # interleaving with them; None means the dump carries no ordering at all.
+        max_position = max(category_positions.values()) if category_positions else None
+
         # Merge chunked category keys (e.g., "Name_ysm_1") into base category
         category_channels = {}
         for key, value in data.items():
@@ -331,8 +359,12 @@ class CategoryViewSet(ModelViewSet):
             if not isinstance(value, list):
                 continue
             # Check if this is a chunk key
-            match = re.match(r'^(.+?)_ysm_\d+$', key)
+            match = POCKETTUBE_CHUNK_SUFFIX_RE.match(key)
             base_name = match.group(1) if match else key
+            # Without a registry (older or partial dumps) every remaining list key is a
+            # category; the internal-key list above is then the only defence.
+            if registry and base_name not in registry:
+                continue
             if base_name not in category_channels:
                 category_channels[base_name] = []
             category_channels[base_name].extend(value)
@@ -386,19 +418,25 @@ class CategoryViewSet(ModelViewSet):
         deleted_assignments = 0
         old_names_by_id = {}
         cat_objects = {}  # name -> Category
+        unpositioned_seen = 0
 
         def _get_or_create_category(name, parent=None):
-            nonlocal created_cats
+            nonlocal created_cats, unpositioned_seen
             if name in cat_objects:
                 return cat_objects[name]
+            sort_order = category_positions.get(name)
+            if sort_order is None:
+                if max_position is None:
+                    sort_order = Category.objects.filter(parent=parent).count() + 1
+                else:
+                    # Encounter-order counter keeps these stable relative to each other,
+                    # since Category.Meta.ordering would otherwise tie-break by name.
+                    sort_order = max_position + 1 + unpositioned_seen
+                    unpositioned_seen += 1
             cat, created = Category.objects.get_or_create(
                 name=name[:256],
                 parent=parent,
-                defaults={
-                    'sort_order': Category.objects.filter(
-                        parent=parent
-                    ).count() + 1,
-                },
+                defaults={'sort_order': sort_order},
             )
             if created:
                 created_cats += 1

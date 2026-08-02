@@ -1,21 +1,34 @@
 {
   "manifest_version": 3,
   "name": "YouTube Subscriptions Helper",
-  "version": "1.0",
-  "description": "Syncs YouTube cookies to the YouTube Subscriptions Organizer app for mark-as-watched functionality.",
+  "version": "2.4",
+  "description": "Syncs YouTube cookies to the YouTube Subscriptions Organizer app and imports PocketTube channel categories from live YouTube data or a PocketTube cloud backup.",
   "permissions": [
-    "cookies"
+    "cookies",
+    "contextMenus",
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
-    "https://*.youtube.com/*"
+    "https://*.youtube.com/*",
+    "https://p.yousub.info/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YouTube Subscriptions Helper"
+  },
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["http://localhost:*/*", "https://*.github.dev/*", "https://*.codespaces.dev/*"],
-      "js": ["content.js"],
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["pockettube-bridge.js"],
       "run_at": "document_idle"
     }
   ],

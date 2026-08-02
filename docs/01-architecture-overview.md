@@ -122,7 +122,76 @@ These are composed behind a `YouTubeService` facade that preserves a single inte
 All video and channel thumbnails are downloaded and cached to `media/thumbnails/`. Served via Django's `MEDIA_URL` configuration. Provides faster load times, offline access, and avoids external image hotlinking.
 
 ### 4.7 PocketTube Import/Export Compatibility
-The category import/export format is fully compatible with the YouTube Subscription Manager (PocketTube) browser extension, allowing bidirectional data migration. The parts of the PocketTube format that are not used by this app are persisted during import and re-used during export.
+The category import/export format is fully compatible with the YouTube Subscription Manager (PocketTube) browser extension, allowing bidirectional data migration. The parts of the PocketTube format that are not used by this app are persisted during import and re-used during export. Preserved metadata is merged key-wise on each import, so a partial upload never destroys keys it does not carry.
+
+Import runs in one of two modes, selected by a `mode` form field:
+- **`replace` (default)** — every `Category` and `SubscriptionCategory` is deleted and rebuilt from the payload, so the app mirrors PocketTube exactly. Categories and assignments removed in PocketTube disappear here too.
+- **`additive`** — creates only; nothing is ever deleted.
+
+Replace deliberately never touches `Subscription`, `Video`, `QueueItem` or `Feed` rows. `Video.channel` and `QueueItem.video` cascade from `Subscription`, so pruning subscriptions absent from a backup would silently destroy thousands of synced videos that the payload cannot restore. Because rebuilding categories assigns new primary keys, `Feed.filter_category_ids` is remapped old-id → name → new-id (supporting both a flat id list and the nested AND-of-OR form), dropping ids whose category no longer exists. A SQLite snapshot is written to `data/db-backups/` before every replace, keeping the newest five, and the whole delete-and-rebuild runs in a single transaction.
+
+### 4.8 PocketTube Direct Sync (Chrome Extension)
+Beyond manual file import, the companion Chrome extension pulls the categorization straight from PocketTube, with no file handling. Two sources are supported and are kept **fully detached** — choosing one never silently falls back to the other:
+
+| Source | Reads | Needs |
+|---|---|---|
+| **Live** (default) | YSM's current `chrome.storage`, via the youtube.com page bus | An open (or briefly opened) youtube.com tab |
+| **Cloud backup** | A snapshot from PocketTube's own backup service | A Patreon/Paddle credential and a paid plan |
+
+Live is current and free; the cloud backup is up to a day stale but works without a YouTube tab and can restore an older state. A live failure reports the reason and offers an explicit button to try the cloud source — it never switches by itself.
+
+Every successful cloud preview labels its first choice as the newest **cloud snapshot**, states that snapshots are scheduled and may be up to a day old, and offers **Use current live data**. Choosing it discards the cloud preview token, persists the Live source and performs a new Live preview; it never imports or switches sources without that explicit action.
+
+**PocketTube is two separate extensions.** This distinction is the single most important fact here — conflating them cost a long misdiagnosis:
+
+| Product | Extension ID | Backup `version` | Holds |
+|---|---|---|---|
+| PocketTube: Youtube **Subscription** Manager (YSM) | `kdmnjgijlmjgmimahnillepgcgeemffb` | `subscriptions` | **The subscription categories** — this is the one we want |
+| PocketTube: Youtube **PlayList** Manager (YPM) | `bplnofkhjdphoihfkfcddikgmecfehdd` | `playlists` | Playlist groups only |
+
+Both are installed side by side, share the vendor's `p.yousub.info` backup service, and use the same Patreon/Paddle credential — but the `version` form field partitions the backup sets. Querying with `playlists` returns the playlist manager's data (a few hundred bytes for a user whose real dataset is 700 KB of subscriptions), which is easy to mistake for "the backup is empty".
+
+**Routes that are closed** (each verified against the installed sources, not assumed):
+- **Google Drive** — PocketTube's "Sync data with Google Drive" writes to the `drive.appdata` folder of its own OAuth client. That folder is readable only by the client that wrote it, with any scope. The only theoretical way in is YSM's stored `ysc_token_google`, i.e. presenting PocketTube's Google credential as PocketTube — deliberately not done. Drive is a transport for the same `chrome.storage` the live source already reads, so it carries no data the live source lacks.
+- **Cross-extension messaging** — neither declares `externally_connectable`. YPM's `onMessageExternal` allow-lists three specific extension IDs for one unrelated command; YSM's requires `sender.origin === "https://pockettube.io"`, which no extension can present.
+- **`chrome.storage`** — isolated per extension.
+- **Scripting PocketTube's own UI** — its export button lives on a `chrome-extension://` page; no extension can inject into another extension's pages, and a cross-origin iframe cannot be scripted or clicked.
+
+**Live source — YSM's page message bus.** A content script on `https://*.youtube.com/*` posts `{ type: 'get_channel_data' }` at `location.origin`; YSM's own content script answers with its live data. **Only this read-only type is ever sent** — `add_group`, `remove_group`, `update_group`, `update_tree`, `set_groups_channels`, `remove_channels`, `share_group`, `mark_watched` and `ysm_unsubscribe` all mutate PocketTube.
+
+```
+reply : { channelList, groupTree, settings, metaList, finish, selectedGroups, unSelectedGroups, videoTypes }
+groupTree : ARRAY of { titleGroup, channelsList, child, newVideoInGroup, countSubInGroup, positionGroup }
+channelsList entry : { channelId, title, img, newVideoCount, subscriberCount, styleCount, position }
+channelList : { "<UC…>": { img, title, count } }   ← CHANNEL metadata
+metaList    : { "<category name>": { img, position } }  ← GROUP metadata, NOT channel metadata
+settings.sub_groups : { parent: { child: {} } }
+```
+
+`finish` is `false` and is **not** a completion signal. `metaList` is keyed by category name — feeding it into channel metadata is a bug. `settings` carries `patreon` and `yu`, so only `sub_groups` is extracted from it. The transform flattens this into the same storage-dump shape the cloud source yields, so both converge on one preview/confirm/import path.
+
+**Cloud source — PocketTube's backup service (paid feature):**
+
+```
+POST https://p.yousub.info/backup/list      version=subscriptions, type=patreon, access_token=<token>
+                                            (or type=paddle, email=<…>, repeated t[]=<token>)  → { keys: [unix ts, …] }
+POST https://p.yousub.info/backup/download  … + id=<chosen key>                                → { data: "<JSON string>" }
+```
+
+A backup is created from `chrome.storage.get(null)`, so `data` has the PocketTube storage-dump shape that `POST /api/categories/import/` consumes. Before preview and upload, the worker removes secrets and the exact malformed category entry `https://www.youtube.com/`; no new backend endpoint is needed. The flow is: read credentials → list → let the user pick a backup (newest preselected) → download → sanitize → validate → preview → explicit confirm → POST as multipart.
+
+The credential lives in YSM's own `chrome.storage.local` under `ysc_settings.patreon` (a JSON **string** containing `access_token`) or `ysc_settings.yu` (`email` + `tokens[]`) — not as top-level storage keys.
+
+**Trust model:**
+- The credential is stored in `chrome.storage.local` and the API host is a hardcoded constant, so it can only ever be transmitted to `p.yousub.info`.
+- The dump comes *back* carrying PocketTube's own secrets, so `patreon`, `yu`, `ysc_token_google` and nested `token`/`secret`/`auth`/`credential`/`password`/`session` fields are silently stripped before anything is sent to the app. Category and channel names are dynamic data keys and remain intact even when their text resembles a credential field.
+- The exact malformed value `https://www.youtube.com/` is removed only from recognized category arrays, including chunks; similarly shaped values and non-category arrays are preserved. The raw downloaded object is never mutated.
+- The user always sees a preview (backup timestamp, category/channel/assignment counts, first category names and removal forecast) and must explicitly confirm. The confirmed payload is cached under a one-shot token, so the committed bytes are exactly the previewed bytes.
+- Switching between Cloud and Live always invalidates the previous one-shot token. Late preview responses are ignored, so an older cloud request cannot overwrite or commit a newer Live preview.
+- The destination origin is allow-listed against loopback and Codespaces hosts and re-checked at commit time.
+- Diagnostic logs are redacted and emitted as text (a structure summary plus JSON), never as objects — console copy renders a logged object as `[object Object]`.
+
+> The cloud API is undocumented and gated behind PocketTube's paid plan. HTTP 402 is reported as "needs an active paid plan", 401/403 as expired credentials.
 
 ## 5. Project File Structure
 
@@ -153,9 +222,20 @@ youtube-subscriptions/
 │       └── commands/
 │           └── youtube_login.py # Extension install instructions
 ├── extension/                   # Chrome extension companion
-│   ├── manifest.json            # MV3 manifest (cookies permission)
-│   ├── background.js            # Reads YouTube cookies via chrome.cookies API
-│   └── content.js               # Bridges web app ↔ extension via postMessage
+│   ├── manifest.json            # MV3 manifest (cookies, contextMenus, storage)
+│   ├── background.js            # Cookie reads; PocketTube live + cloud-backup sync
+│   ├── content.js               # Bridges web app ↔ extension via postMessage
+│   ├── pockettube-bridge.js     # youtube.com content script; asks YSM for live data
+│   ├── pockettube-live.js       # Live reply → PocketTube storage-dump format
+│   ├── popup.html               # Toolbar popup UI (a run only, no settings)
+│   ├── popup.js                 # Popup logic: auto-preview on open, one-click commit
+│   ├── options.html             # Options page UI (open_in_tab)
+│   └── options.js               # Settings: app origin, credentials, source, mode
+│   └── tests/harness.mjs        # Stubbed chrome/fetch tests (node, no deps)
+├── data/                        # App state (never served)
+│   └── pockettube_metadata.json # Preserved PocketTube keys for export round-trip
+├── scripts/                     # Developer tooling
+│   └── chrome_extension.py      # Detects a stale registered service worker
 ├── frontend/                    # React SPA (Vite + TypeScript)
 │   ├── package.json
 │   ├── vite.config.ts
