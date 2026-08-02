@@ -3,11 +3,15 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import requests as http_requests
+from django.conf import settings
 from django.db import models, transaction
 from django.db.models import Count, Max, Q
 from django.http import FileResponse, JsonResponse
@@ -31,7 +35,17 @@ class HealthCheckView(APIView):
         return Response({"status": "ok"})
 
 
-POCKETTUBE_METADATA_PATH = os.path.join('media', 'pockettube_metadata.json')
+# Application state, deliberately outside MEDIA_ROOT: media is served publicly under DEBUG
+_DEFAULT_POCKETTUBE_METADATA_PATH = os.path.join(settings.BASE_DIR, 'data', 'pockettube_metadata.json')
+_LEGACY_POCKETTUBE_METADATA_PATH = os.path.join(settings.BASE_DIR, 'media', 'pockettube_metadata.json')
+POCKETTUBE_METADATA_PATH = _DEFAULT_POCKETTUBE_METADATA_PATH
+
+MAX_IMPORT_FILE_SIZE = 32 * 1024 * 1024
+
+IMPORT_MODES = ('replace', 'additive')
+
+DB_BACKUP_DIR = os.path.join(settings.BASE_DIR, 'data', 'db-backups')
+DB_BACKUP_RETENTION = 5
 
 # Keys in PocketTube JSON that are not category mappings
 POCKETTUBE_INTERNAL_KEYS = {
@@ -40,6 +54,84 @@ POCKETTUBE_INTERNAL_KEYS = {
     'ysc_popup', 'ysc_settings', 'ysc_subs_count', 'ysc_title_id',
     'ysc_token_google',
 }
+
+
+def _migrate_legacy_metadata_file():
+    """Move any metadata file left in MEDIA_ROOT to the non-served location."""
+    if POCKETTUBE_METADATA_PATH != _DEFAULT_POCKETTUBE_METADATA_PATH:
+        return  # path is patched (tests); leave the real files alone
+    if not os.path.exists(_LEGACY_POCKETTUBE_METADATA_PATH):
+        return
+    os.makedirs(os.path.dirname(POCKETTUBE_METADATA_PATH), exist_ok=True)
+    if os.path.exists(POCKETTUBE_METADATA_PATH):
+        os.remove(_LEGACY_POCKETTUBE_METADATA_PATH)
+    else:
+        os.replace(_LEGACY_POCKETTUBE_METADATA_PATH, POCKETTUBE_METADATA_PATH)
+
+
+def _is_http_url(url):
+    """Blocks SSRF through file://, gopher:// and friends in imported URLs."""
+    if not isinstance(url, str):
+        return False
+    try:
+        return urlparse(url).scheme in ('http', 'https')
+    except ValueError:
+        return False
+
+
+def _snapshot_database():
+    """Copies the SQLite file aside before a destructive import. Best effort: a failed
+    snapshot logs a warning instead of blocking the import."""
+    db = settings.DATABASES.get('default', {})
+    if 'sqlite3' not in db.get('ENGINE', ''):
+        logger.warning('Skipping database snapshot: engine %r is not SQLite.', db.get('ENGINE'))
+        return
+    db_path = str(db.get('NAME') or '')
+    if not db_path or not os.path.exists(db_path):
+        logger.warning('Skipping database snapshot: no database file at %r.', db_path)
+        return
+    try:
+        os.makedirs(DB_BACKUP_DIR, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        target = os.path.join(DB_BACKUP_DIR, f'db-{stamp}.sqlite3')
+        shutil.copy2(db_path, target)
+        logger.info('Database snapshot written to %s', target)
+        # Timestamped names sort chronologically, so the tail is the newest set to keep
+        backups = sorted(
+            name for name in os.listdir(DB_BACKUP_DIR)
+            if name.startswith('db-') and name.endswith('.sqlite3')
+        )
+        for stale in backups[:-DB_BACKUP_RETENTION]:
+            os.remove(os.path.join(DB_BACKUP_DIR, stale))
+    except OSError:
+        logger.warning('Database snapshot failed; continuing with import.', exc_info=True)
+
+
+def _remap_feed_categories(old_names_by_id, new_ids_by_name):
+    """Feed.filter_category_ids stores category primary keys, which change when the
+    category table is rebuilt; translate them old id -> name -> new id. The field holds
+    either a flat id list or a list of OR groups, so both shapes are preserved."""
+    def _remap_ids(ids):
+        remapped = []
+        for old_id in ids:
+            new_id = new_ids_by_name.get(old_names_by_id.get(old_id))
+            if new_id is not None and new_id not in remapped:
+                remapped.append(new_id)
+        return remapped
+
+    for feed in Feed.objects.all():
+        old_ids = feed.filter_category_ids
+        if not isinstance(old_ids, list) or not old_ids:
+            continue
+        if isinstance(old_ids[0], list):
+            # An emptied group would match no channel at all, so drop it entirely
+            groups = (_remap_ids(g) for g in old_ids if isinstance(g, list))
+            new_ids = [g for g in groups if g]
+        else:
+            new_ids = _remap_ids(old_ids)
+        if new_ids != old_ids:
+            feed.filter_category_ids = new_ids
+            feed.save(update_fields=['filter_category_ids'])
 
 
 class CategoryViewSet(ModelViewSet):
@@ -172,12 +264,12 @@ class CategoryViewSet(ModelViewSet):
         }
 
         # Load preserved PocketTube metadata if available
+        _migrate_legacy_metadata_file()
         if os.path.exists(POCKETTUBE_METADATA_PATH):
             with open(POCKETTUBE_METADATA_PATH, 'r') as f:
                 preserved = json.load(f)
             for key in ('ysc_collection', 'ysc_meta', 'ysc_settings',
-                        'ysc_title_id', 'ysc_deck', 'ysc_popup',
-                        'ysc_token_google'):
+                        'ysc_title_id', 'ysc_deck', 'ysc_popup'):
                 if key in preserved:
                     export[key] = preserved[key]
 
@@ -192,37 +284,44 @@ class CategoryViewSet(ModelViewSet):
     @action(detail=False, methods=['post'], url_path='import',
             parser_classes=[MultiPartParser])
     def import_categories(self, request):
+        mode = str(request.data.get('mode') or 'replace').strip().lower()
+        if mode not in IMPORT_MODES:
+            return Response(
+                {'error': "Invalid mode. Accepted values: 'replace', 'additive'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         file = request.FILES.get('file')
         if not file:
             return Response(
                 {'error': 'No file provided.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if file.size > MAX_IMPORT_FILE_SIZE:
+            return Response(
+                {'error': 'File too large.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             data = json.load(file)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+            # RecursionError: deeply nested JSON is not a JSONDecodeError
             return Response(
                 {'error': 'Invalid JSON file.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        # Save PocketTube-specific metadata for later export
-        pockettube_meta = {}
-        for key in ('ysc_collection', 'ysc_meta', 'ysc_settings',
-                     'ysc_title_id', 'ysc_deck', 'ysc_popup',
-                     'ysc_token_google'):
-            if key in data:
-                pockettube_meta[key] = data[key]
-        os.makedirs(os.path.dirname(POCKETTUBE_METADATA_PATH), exist_ok=True)
-        with open(POCKETTUBE_METADATA_PATH, 'w') as f:
-            json.dump(pockettube_meta, f, indent=2)
+        if not isinstance(data, dict):
+            return Response(
+                {'error': 'Expected a JSON object at the top level.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Detect hierarchy from ysc_settings.sub_groups
         sub_groups = {}
-        settings = data.get('ysc_settings', {})
-        if isinstance(settings, dict) and 'sub_groups' in settings:
-            sub_groups = settings['sub_groups']  # dict: parent -> {child: {}, ...}
+        ysc_settings = data.get('ysc_settings')
+        if isinstance(ysc_settings, dict) and isinstance(ysc_settings.get('sub_groups'), dict):
+            sub_groups = ysc_settings['sub_groups']  # dict: parent -> {child: {}, ...}
 
         # Merge chunked category keys (e.g., "Name_ysm_1") into base category
         category_channels = {}
@@ -239,49 +338,53 @@ class CategoryViewSet(ModelViewSet):
             category_channels[base_name].extend(value)
 
         # Create subscriptions from ysc_channel_metadata
-        channel_metadata = data.get('ysc_channel_metadata', {})
-        channels_health = data.get('channelsHealth', {})
-        topic_cache = data.get('topicCache', {})
-        subs_count = data.get('ysc_subs_count', {})
+        channel_metadata = data.get('ysc_channel_metadata')
+        channel_metadata = channel_metadata if isinstance(channel_metadata, dict) else {}
+        channels_health = data.get('channelsHealth')
+        channels_health = channels_health if isinstance(channels_health, dict) else {}
+        topic_cache = data.get('topicCache')
+        topic_cache = topic_cache if isinstance(topic_cache, dict) else {}
+        subs_count = data.get('ysc_subs_count')
+        subs_count = subs_count if isinstance(subs_count, dict) else {}
+
+        # Save PocketTube-specific metadata for later export, only once the payload has
+        # been validated, merging into existing metadata so partial imports preserve other keys
+        _migrate_legacy_metadata_file()
+        pockettube_meta = {}
+        if os.path.exists(POCKETTUBE_METADATA_PATH):
+            try:
+                with open(POCKETTUBE_METADATA_PATH, 'r') as f:
+                    existing = json.load(f)
+                if isinstance(existing, dict):
+                    pockettube_meta = existing
+            except (json.JSONDecodeError, OSError):
+                pockettube_meta = {}
+        for key in ('ysc_collection', 'ysc_meta', 'ysc_settings',
+                     'ysc_title_id', 'ysc_deck', 'ysc_popup'):
+            if key in data:
+                pockettube_meta[key] = data[key]
+        meta_dir = os.path.dirname(POCKETTUBE_METADATA_PATH)
+        os.makedirs(meta_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=meta_dir, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(pockettube_meta, f, indent=2)
+            os.replace(tmp_path, POCKETTUBE_METADATA_PATH)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+        if mode == 'replace':
+            _snapshot_database()
 
         created_subs = 0
-        with transaction.atomic():
-            for ch_id, meta in channel_metadata.items():
-                title = meta.get('title', ch_id)
-                thumbnail = meta.get('img', '')
-                sub, created = Subscription.objects.get_or_create(
-                    channel_id=ch_id,
-                    defaults={
-                        'channel_title': title,
-                        'thumbnail_url': thumbnail,
-                    },
-                )
-                if created:
-                    created_subs += 1
-
-                # Update metadata from PocketTube data
-                updated_fields = []
-                sc_data = subs_count.get(ch_id, {})
-                if sc_data.get('sc'):
-                    sub.subscriber_count = sc_data['sc']
-                    updated_fields.append('subscriber_count')
-                if sc_data.get('t'):
-                    sub.topics = sc_data['t']
-                    updated_fields.append('topics')
-                if ch_id in channels_health:
-                    sub.last_published_at = channels_health[ch_id]
-                    updated_fields.append('last_published_at')
-                if ch_id in topic_cache:
-                    sub.topic_in_topic_cache = True
-                    if not sub.topics:
-                        sub.topics = topic_cache[ch_id]
-                        updated_fields.append('topics')
-                    updated_fields.append('topic_in_topic_cache')
-                if updated_fields:
-                    sub.save(update_fields=list(set(updated_fields)))
-
-        # Create categories using hierarchy
         created_cats = 0
+        assignments_added = 0
+        unmatched_channels = 0
+        deleted_categories = 0
+        deleted_assignments = 0
+        old_names_by_id = {}
         cat_objects = {}  # name -> Category
 
         def _get_or_create_category(name, parent=None):
@@ -289,7 +392,7 @@ class CategoryViewSet(ModelViewSet):
             if name in cat_objects:
                 return cat_objects[name]
             cat, created = Category.objects.get_or_create(
-                name=name,
+                name=name[:256],
                 parent=parent,
                 defaults={
                     'sort_order': Category.objects.filter(
@@ -302,12 +405,65 @@ class CategoryViewSet(ModelViewSet):
             cat_objects[name] = cat
             return cat
 
+        # One transaction: a failure must never leave the categories wiped and not rebuilt
         with transaction.atomic():
+            for ch_id, meta in channel_metadata.items():
+                meta = meta if isinstance(meta, dict) else {}
+                title = str(meta.get('title', ch_id))[:256]
+                thumbnail = meta.get('img', '')
+                if not _is_http_url(thumbnail):
+                    thumbnail = ''
+                sub, created = Subscription.objects.get_or_create(
+                    channel_id=ch_id,
+                    defaults={
+                        'channel_title': title,
+                        'thumbnail_url': thumbnail,
+                    },
+                )
+                if created:
+                    created_subs += 1
+
+                # Update metadata from PocketTube data
+                updated_fields = []
+                sc_data = subs_count.get(ch_id)
+                sc_data = sc_data if isinstance(sc_data, dict) else {}
+                if sc_data.get('sc'):
+                    sub.subscriber_count = str(sc_data['sc'])[:32]
+                    updated_fields.append('subscriber_count')
+                if sc_data.get('t'):
+                    sub.topics = sc_data['t']
+                    updated_fields.append('topics')
+                if ch_id in channels_health:
+                    sub.last_published_at = str(channels_health[ch_id])[:64]
+                    updated_fields.append('last_published_at')
+                if ch_id in topic_cache:
+                    sub.topic_in_topic_cache = True
+                    if not sub.topics:
+                        sub.topics = topic_cache[ch_id]
+                        updated_fields.append('topics')
+                    updated_fields.append('topic_in_topic_cache')
+                if updated_fields:
+                    sub.save(update_fields=list(set(updated_fields)))
+
+            if mode == 'replace':
+                # Wipe categories and assignments only: subscriptions, videos and queue
+                # items must survive, since the payload carries no video data to restore.
+                old_names_by_id = dict(Category.objects.values_list('id', 'name'))
+                deleted_assignments = SubscriptionCategory.objects.all().delete()[1].get(
+                    'subscriptions.SubscriptionCategory', 0
+                )
+                deleted_categories = Category.objects.all().delete()[1].get(
+                    'subscriptions.Category', 0
+                )
+
+            # Create categories using hierarchy
             if sub_groups:
                 # Use hierarchy from sub_groups
                 for parent_name, children_dict in sub_groups.items():
                     if parent_name in category_channels:
                         parent_cat = _get_or_create_category(parent_name)
+                        if not isinstance(children_dict, dict):
+                            continue
                         for child_name in children_dict:
                             if child_name in category_channels:
                                 _get_or_create_category(child_name, parent=parent_cat)
@@ -319,16 +475,15 @@ class CategoryViewSet(ModelViewSet):
                 for name in category_channels:
                     _get_or_create_category(name)
 
-        # Assign subscriptions to categories
-        assignments_added = 0
-        unmatched_channels = 0
-
-        with transaction.atomic():
+            # Assign subscriptions to categories
             for cat_name, channel_ids in category_channels.items():
                 cat = cat_objects.get(cat_name)
                 if not cat:
                     continue
                 for ch_id in channel_ids:
+                    if not isinstance(ch_id, str):
+                        unmatched_channels += 1
+                        continue
                     try:
                         sub = Subscription.objects.get(channel_id=ch_id)
                         _, created = SubscriptionCategory.objects.get_or_create(
@@ -340,12 +495,21 @@ class CategoryViewSet(ModelViewSet):
                     except Subscription.DoesNotExist:
                         unmatched_channels += 1
 
+            if mode == 'replace':
+                _remap_feed_categories(
+                    old_names_by_id,
+                    {cat.name: cat.id for cat in cat_objects.values()},
+                )
+
         return Response({
             'message': 'Import complete',
+            'mode': mode,
             'created_categories': created_cats,
             'created_subscriptions': created_subs,
             'assignments_added': assignments_added,
             'unmatched_channels': unmatched_channels,
+            'deleted_categories': deleted_categories,
+            'deleted_assignments': deleted_assignments,
         })
 
 
@@ -512,6 +676,10 @@ class SubscriptionThumbnailView(APIView):
 
         if not subscription.thumbnail_url:
             return Response({'error': 'No thumbnail available.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Rows imported before URL validation may hold arbitrary schemes
+        if not _is_http_url(subscription.thumbnail_url):
+            return Response({'error': 'Unsupported thumbnail URL.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Download and cache
         try:

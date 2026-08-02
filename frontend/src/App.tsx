@@ -80,11 +80,16 @@ function AppContent() {
     const file = e.target.files?.[0];
     if (!file) return;
     const ok = await confirm({
-      title: 'Import Categories',
-      message: 'Import categories from this file?',
+      title: 'Replace Categories',
+      message:
+        'This replaces your categories: every category and every ' +
+        'channel-to-category assignment is deleted and rebuilt from this file, ' +
+        'so anything not in the file is removed. Subscriptions, videos and the ' +
+        'queue are kept, feed category filters are remapped, and the database is ' +
+        'snapshotted first. Continue?',
     });
     if (ok) {
-      await importCategories(file);
+      await importCategories(file, 'replace');
     }
     // Reset file input
     if (fileInputRef.current) fileInputRef.current.value = '';

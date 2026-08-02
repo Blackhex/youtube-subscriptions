@@ -64,6 +64,18 @@ describe('API Client', () => {
     expect(config.headers['Content-Type']).toBe('multipart/form-data');
   });
 
+  it('importCategories sends the mode explicitly, defaulting to replace', async () => {
+    const file = new File(['{}'], 'categories.json', { type: 'application/json' });
+
+    mockedInstance.post.mockResolvedValueOnce({ data: {} });
+    await apiModule.importCategories(file);
+    expect((mockedInstance.post.mock.calls[0][1] as FormData).get('mode')).toBe('replace');
+
+    mockedInstance.post.mockResolvedValueOnce({ data: {} });
+    await apiModule.importCategories(file, 'additive');
+    expect((mockedInstance.post.mock.calls[1][1] as FormData).get('mode')).toBe('additive');
+  });
+
   it('exportCategories uses blob responseType', async () => {
     mockedInstance.get.mockResolvedValueOnce({ data: new Blob() });
     await apiModule.exportCategories();

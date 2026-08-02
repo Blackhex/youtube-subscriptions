@@ -127,6 +127,9 @@ STATICFILES_DIRS = [
 MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "/media/"
 
+# Explicit cap on non-file request bodies (Django's default, stated deliberately)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2621440
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOW_ALL_ORIGINS = True

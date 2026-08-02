@@ -10,6 +10,21 @@ export interface Category {
   updated_at: string;
 }
 
+// 'replace' wipes every category and assignment and rebuilds them from the
+// payload; 'additive' only creates what is missing.
+export type CategoryImportMode = 'replace' | 'additive';
+
+export interface CategoryImportResult {
+  message: string;
+  mode: CategoryImportMode;
+  created_categories: number;
+  created_subscriptions: number;
+  assignments_added: number;
+  unmatched_channels: number;
+  deleted_categories: number;
+  deleted_assignments: number;
+}
+
 export interface Subscription {
   id: number;
   subscription_id: string | null;

@@ -33,7 +33,7 @@ description: "Django REST Framework API implementation for YouTube Subscriptions
 - `update()` → validate no circular parent references
 - `@action reorder` → `POST /api/categories/reorder/` with `{ parent_id, ordered_ids }`
 - `@action export_categories` → PocketTube JSON download
-- `@action import_categories` → multipart file upload, parse PocketTube format
+- `@action import_categories` → multipart file upload (`file` + optional `mode`), parse PocketTube format. `mode=replace` (default) wipes and rebuilds categories + assignments only; `mode=additive` is the legacy get_or_create behaviour
 
 #### Subscription (`SubscriptionViewSet`)
 - `list()` → paginated (page/per_page), filter by `category_id` or `uncategorized=true`
@@ -111,6 +111,16 @@ for channel_id in page_channel_ids:
 - `short` — YouTube Short (duration ≤ 60s)
 - `live` — Active livestream
 - `upcoming` — Scheduled/upcoming livestream
+
+## PocketTube Import Modes
+
+`POST /api/categories/import/` takes `mode` alongside `file`; absent or empty means `replace`.
+
+- **Scope the wipe to `Category` + `SubscriptionCategory` only.** Never prune `Subscription` rows that are missing from the payload: `Video.channel` is `FK(Subscription, CASCADE)` and `QueueItem.video` is `FK(Video, CASCADE)`, so pruning silently destroys thousands of videos and the queue, and the payload has no video data to restore them.
+- Delete assignments explicitly before categories rather than relying on cascade order, and read counts from `.delete()[1]` keyed by label (`'subscriptions.SubscriptionCategory'`) — `[0]` includes cascaded rows and self-FK children.
+- **Rebuilding categories invalidates `Feed.filter_category_ids`,** which stores primary keys. Remap old id → name → new id after the rebuild. The field has two shapes: a flat id list *and* a list of OR groups (`[[34], [20]]` in real data) — handle both, and drop a group that the remap empties, since `category_id__in=[]` matches nothing.
+- Wrap delete + rebuild in one `transaction.atomic()`; nested `atomic()` blocks inside it are savepoints and are harmless.
+- Snapshot the SQLite file (`settings.DATABASES['default']['NAME']`) before opening the transaction, keep the newest 5. Under the test runner `NAME` is `file:memorydb_default?mode=memory&cache=shared`, so an `os.path.exists` check naturally skips the snapshot in tests.
 
 ## Constraints
 - All views use `AllowAny` permission (local app)

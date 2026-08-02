@@ -1,5 +1,7 @@
 # Data
 db.sqlite3
+data/pockettube_metadata.json
+data/db-backups/
 
 # VSCode
 .vscode/task-history.ndjson

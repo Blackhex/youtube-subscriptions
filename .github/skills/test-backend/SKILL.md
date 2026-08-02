@@ -134,8 +134,62 @@ def test_gemini_suggestions(self, mock_post):
 python manage.py test subscriptions
 python manage.py test subscriptions.tests.test_models
 python manage.py test subscriptions.tests.test_views_feeds -v 2
+python manage.py test subscriptions --shuffle   # proves order-independence
 ```
 
+## Testing Destructive Endpoints
+
+### Seed pre-existing state or the test is vacuous
+`POST /api/categories/import/` in `replace` mode wipes categories and assignments. Tests
+that start from an empty database delete nothing, so replace and additive produce
+identical counts and the whole behaviour goes unverified. Always seed rows that the
+payload does **not** mention, then assert both what disappeared and what survived.
+
+### Assert what must NOT be deleted
+`Video.channel` and `QueueItem.video` cascade from `Subscription`. A regression that
+prunes subscriptions would silently take the entire video library with it, so seed a
+subscription absent from the payload plus a video and queue item for it, and assert all
+three still exist.
+
+### Patch module-level `settings`, not `override_settings(DATABASES=...)`
+Overriding `DATABASES` or mutating `settings.DATABASES` mid-test risks disturbing the
+connection the `TestCase` transaction is running on. When only one helper reads settings
+at request time (`_snapshot_database` reads `settings.DATABASES`), patch the name inside
+that module instead — Django's real connections are untouched:
+```python
+fake = SimpleNamespace(DATABASES={'default': {'ENGINE': ..., 'NAME': tmp_db_path}})
+patch('subscriptions.views.settings', fake).start()
+```
+Note the SQLite test database is in-memory (`file:memorydb_default?...`), so
+`os.path.exists(NAME)` is False and file-snapshot code skips by default.
+
+### Redirect every filesystem path through `tempfile`
+Patch module-level path constants (`POCKETTUBE_METADATA_PATH`, `DB_BACKUP_DIR`) per test
+via a mixin with `addCleanup(shutil.rmtree, tmpdir, True)`. Never let a test write into
+the developer's `data/`, `media/` or `db.sqlite3`.
+
+### Testing `transaction.atomic()` rollback
+Patch a manager method on the model to raise, and let the exception propagate out of the
+test client (`raise_request_exception` is True by default; DRF only converts
+`APIException`):
+```python
+with patch.object(Category.objects, 'get_or_create', side_effect=RuntimeError('boom')) as m:
+    with self.assertRaises(RuntimeError):
+        self._import(mode='replace')
+self.assertTrue(m.called)  # proves the failure landed AFTER the wipe, not before
+```
+The `assertTrue(m.called)` guard matters: without it the test also passes against an
+implementation that never deleted anything.
+
+### Time-stamped file pruning
+Snapshot names use per-second timestamps, so two imports in the same second collide.
+Test retention by pre-creating dated files (`db-20200101-000001.sqlite3` ...) and running
+a single import; names sort chronologically, so the new one always sorts last.
+
+### Sentinel for "field omitted" vs "field empty"
+Defaults that trigger on both a missing and an empty value need three distinct cases.
+Use a module-level `_OMIT = object()` so a helper can tell "don't send the field" from
+"send an empty string".
 ## Testing On-Demand ("Lazy") Sync
 
 ### Patch where the name lives, not where it is used, for function-local imports

@@ -30,7 +30,7 @@ description: "React frontend implementation for YouTube Subscriptions Organizer.
 - `<Navbar>`: Section pills (Feeds/Playlists/Subscriptions) + context-sensitive action buttons
 - `<Spinner>`: Fixed centered overlay
 - `<Toast>`: Bootstrap toast bottom-right, 3 variants, auto-dismiss 4s, `useToast()` hook
-- `<ConfirmDialog>`: Modal with `useConfirm()` returning `Promise<boolean>`
+- `<ConfirmDialog>`: Modal with `useConfirm()` returning `Promise<boolean>`. Its `message` is the only place a destructive backend default is explained to the user — when an endpoint's semantics change (e.g. category import went from additive to replace-by-default), the confirm text and the API client's explicit parameter have to change together, or the UI quietly lies.
 
 ### 3. Subscriptions Section (Phase 11)
 - `<SubscriptionsSection>`: Two-panel with `<SidebarResizer>` (120px–50%, persisted to localStorage)
@@ -54,7 +54,7 @@ description: "React frontend implementation for YouTube Subscriptions Organizer.
 ### 6. Custom Hooks
 | Hook | Key Responsibilities |
 |------|---------------------|
-| `useCategories()` | CRUD, reorder, import/export, tree operations |
+| `useCategories()` | CRUD, reorder, import/export, tree operations. `importCategories(file, mode = 'replace')` always sends the mode instead of relying on the server default |
 | `useSubscriptions()` | Paginated fetch, search, selection, assign/unassign |
 | `useFeeds()` | CRUD feeds, load videos per feed with pagination, `reorderFeeds(orderedIds)` |
 | `useQueue()` | Add/remove/reorder, create playlist |

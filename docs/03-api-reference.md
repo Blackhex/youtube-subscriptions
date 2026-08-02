@@ -332,18 +332,35 @@ Export all categories in PocketTube-compatible JSON format. Custom `@action(deta
 ### `POST /api/categories/import/`
 Import categories from PocketTube JSON file. Custom `@action(detail=False)`.
 
-**Request:** `multipart/form-data` with `file` field
+**Request:** `multipart/form-data` with `file` field and optional `mode` field (`replace` — the default when absent or empty — or `additive`). Any other value is rejected with HTTP 400.
 
 **Response (200):**
 ```json
 {
   "message": "Import complete",
+  "mode": "replace",
   "created_categories": 5,
   "created_subscriptions": 120,
   "assignments_added": 850,
-  "unmatched_channels": 3
+  "unmatched_channels": 3,
+  "deleted_categories": 43,
+  "deleted_assignments": 2325
 }
 ```
+
+**Semantics — `replace` (default):** every `Category` and every `SubscriptionCategory` row is deleted and rebuilt from the payload, so the app mirrors PocketTube exactly: categories absent from the payload disappear, and assignments removed in PocketTube disappear. The wipe is scoped to categories and assignments only — `Subscription`, `Video`, `QueueItem` and `Feed` rows all survive. Subscriptions missing from the payload are deliberately **not** pruned, because `Video.channel` and `QueueItem.video` cascade on delete and the payload carries no video data to restore. The delete-and-rebuild runs in a single `transaction.atomic()`.
+
+**Semantics — `additive`:** the previous behaviour. Categories, subscriptions and assignments use `get_or_create`; nothing is deleted or unassigned. `deleted_categories` and `deleted_assignments` are `0`.
+
+**Feed filter remapping (replace only):** `Feed.filter_category_ids` holds category primary keys, which change when the category table is rebuilt. Stored ids are translated old id → name → new id; ids whose category name is no longer in the payload are dropped, and only feeds whose list actually changed are saved. Both supported shapes are preserved (flat id list, or list of OR groups); a group emptied by the remap is removed rather than left to match nothing. Additive mode leaves feeds untouched, since the ids remain valid.
+
+**Database snapshot (replace only):** before any mutation, the SQLite file at `settings.DATABASES['default']['NAME']` is copied to `data/db-backups/db-YYYYMMDD-HHMMSS.sqlite3` and only the 5 most recent snapshots are kept. If the engine is not SQLite or the file is missing, the snapshot is skipped with a logged warning rather than failing the import. The directory is git-ignored.
+
+**Preserved metadata:** the PocketTube-only keys (`ysc_collection`, `ysc_meta`, `ysc_settings`, `ysc_title_id`, `ysc_deck`, `ysc_popup`) are merged key-wise into `data/pockettube_metadata.json` and re-emitted by `GET /api/categories/export/`. Only keys present in the upload are replaced, so a partial upload leaves the rest intact. A missing or corrupt metadata file is treated as empty rather than failing the import. `ysc_token_google` is deliberately **not** preserved — it is a Google OAuth token and is neither stored nor exported.
+
+**Validation:** rejects a non-dict JSON root, a file over 32 MB, and unparseable JSON (including `RecursionError` and `UnicodeDecodeError`) with HTTP 400. Container values of the wrong type degrade to empty rather than raising. Imported thumbnail URLs are kept only when the scheme is `http`/`https`. `subscriber_count`, `last_published_at`, `channel_title` and `Category.name` are truncated to their model `max_length`.
+
+**Callers:** the web UI's Import action (user-selected file) and the Chrome extension's PocketTube cloud-backup sync. No separate endpoint exists for the extension.
 
 ---
 

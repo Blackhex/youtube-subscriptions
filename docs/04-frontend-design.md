@@ -192,6 +192,7 @@ Tree structure rendered recursively via `<CategoryNode>`:
 - Bootstrap modal, centered, small size
 - Title + message + Cancel/OK buttons
 - Exposes via `useConfirm()` hook returning `Promise<boolean>`
+- The category-import call site ("Replace Categories") spells out that every category and assignment is deleted and rebuilt from the file, since `importCategories` sends `mode=replace`
 
 ### `<AlertDialog>` Component
 - Same as confirm but with only OK button
@@ -321,7 +322,7 @@ AppContext (React Context + useReducer)
 ### Custom Hooks
 | Hook | Responsibility |
 |------|---------------|
-| `useCategories()` | CRUD, reorder, import/export, tree operations |
+| `useCategories()` | CRUD, reorder, import/export, tree operations. `importCategories(file, mode = 'replace')` sends the mode explicitly and reports deletions as well as creations in its toast |
 | `useSubscriptions()` | Paginated fetch, search, selection, assignment |
 | `useFeeds()` | CRUD, video loading with infinite scroll, `reorderFeeds()` (optimistic column order + `POST /api/feeds/reorder/`) |
 | `useQueue()` | Add/remove/reorder, create playlist |

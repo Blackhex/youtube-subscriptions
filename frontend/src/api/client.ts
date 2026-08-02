@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Category, Subscription, Video, QueueItem, Feed, SyncState, Playlist, PaginatedResponse } from '../types';
+import type { Category, Subscription, Video, QueueItem, Feed, SyncState, Playlist, PaginatedResponse, CategoryImportMode, CategoryImportResult } from '../types';
 
 const api = axios.create({
   baseURL: '/api',
@@ -19,10 +19,13 @@ export const reorderCategories = (parent_id: number | null, ordered_ids: number[
   api.post('/categories/reorder/', { parent_id, ordered_ids });
 export const exportCategories = () =>
   api.get('/categories/export/', { responseType: 'blob' });
-export const importCategories = (file: File) => {
+// The mode is always sent explicitly: the backend default is 'replace', which
+// deletes every category and assignment before rebuilding them.
+export const importCategories = (file: File, mode: CategoryImportMode = 'replace') => {
   const formData = new FormData();
   formData.append('file', file);
-  return api.post('/categories/import/', formData, {
+  formData.append('mode', mode);
+  return api.post<CategoryImportResult>('/categories/import/', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
 };
