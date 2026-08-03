@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
@@ -353,6 +354,26 @@ class FeedVideosTypeFilterTest(FeedVideosBaseTest):
         data = resp.json()
         self.assertEqual(data['total'], 1)
         self.assertEqual(data['items'][0]['video_id'], 'v_old')
+
+
+class FeedVideosProgressTest(FeedVideosBaseTest):
+    @patch('subscriptions.youtube_service.YouTubeService')
+    def test_missing_history_does_not_erase_lounge_progress(self, MockYTService):
+        self.v_prog1.playback_progress = 42
+        self.v_prog1.save(update_fields=['playback_progress'])
+        MockYTService.return_value.fetch_channel_video_progress.return_value = {}
+        feed = Feed.objects.create(name="Progress")
+
+        response = self.client.get(f'/api/feeds/{feed.id}/videos/')
+
+        self.assertEqual(response.status_code, 200)
+        progress_by_id = {
+            item['video_id']: item['playback_progress']
+            for item in response.json()['items']
+        }
+        self.assertEqual(progress_by_id['v_prog1'], 42)
+        self.v_prog1.refresh_from_db()
+        self.assertEqual(self.v_prog1.playback_progress, 42)
 
 
 class FeedVideosDurationFilterTest(FeedVideosBaseTest):

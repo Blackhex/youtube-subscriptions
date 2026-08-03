@@ -36,6 +36,10 @@ export default defineConfig({
 });
 ```
 
+Even with `globals: true` at runtime, tests under `src/` are type-checked by
+`tsconfig.app.json`. Explicitly import every used test API from `vitest` so
+`npm run build` does not depend on global Vitest types.
+
 ### Test Setup (`frontend/src/test/setup.ts`)
 ```typescript
 import '@testing-library/jest-dom';

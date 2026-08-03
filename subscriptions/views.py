@@ -893,13 +893,6 @@ class FeedViewSet(ModelViewSet):
                         progress = all_progress.get(vid_id)
                         if progress is not None:
                             Video.objects.filter(video_id=vid_id).update(playback_progress=progress)
-                        else:
-                            # Video not in channel browse = not watched (or channel didn't return it)
-                            # Only reset if video currently has progress
-                            Video.objects.filter(
-                                video_id=vid_id,
-                                playback_progress__isnull=False,
-                            ).update(playback_progress=None, watched_locally=False)
 
                     # Refresh items from DB to get updated progress
                     items = qs[offset:offset + per_page]
