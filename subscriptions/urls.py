@@ -36,6 +36,7 @@ urlpatterns = [
     # Mark watched
     path("videos/<str:video_id>/mark-watched/", views.MarkWatchedView.as_view(), name="mark-watched"),
     # OAuth
+    path("auth/oauth/callback/", views.OAuthCallbackView.as_view(), name="oauth-callback"),
     path("auth/oauth/", views.OAuthView.as_view(), name="oauth"),
     # YouTube session
     path("auth/youtube-session/", views.YouTubeSessionView.as_view(), name="youtube-session"),

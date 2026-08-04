@@ -1,5 +1,5 @@
 ---
-description: "Frontend test engineer for YouTube Subscriptions Organizer. Use when: writing React component tests, hook tests, integration tests, Vitest setup, React Testing Library tests, testing drag-and-drop, testing infinite scroll, testing API client, testing state management."
+description: "Frontend and companion-extension test engineer. Use when: testing React components/hooks or the Chrome extension worker, popup, permissions, content bridge, and browser relays."
 tools: [execute, read, browser, edit, search]
 ---
 
@@ -16,6 +16,7 @@ Load this skill before starting work:
 - Write API client tests with mocked axios
 - Write integration tests that verify user interaction flows
 - Provide `renderWithProviders` helper and mock data factories
+- Extend and run `extension/tests/harness.mjs` for extension worker, popup, permission, content-script, and relay behavior
 
 ## Approach
 1. Read the test-frontend skill for Vitest config, test setup, and directory structure

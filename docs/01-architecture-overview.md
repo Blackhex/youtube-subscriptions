@@ -188,7 +188,7 @@ The credential lives in YSM's own `chrome.storage.local` under `ysc_settings.pat
 - The exact malformed value `https://www.youtube.com/` is removed only from recognized category arrays, including chunks; similarly shaped values and non-category arrays are preserved. The raw downloaded object is never mutated.
 - The user always sees a preview (backup timestamp, category/channel/assignment counts, first category names and removal forecast) and must explicitly confirm. The confirmed payload is cached under a one-shot token, so the committed bytes are exactly the previewed bytes.
 - Switching between Cloud and Live always invalidates the previous one-shot token. Late preview responses are ignored, so an older cloud request cannot overwrite or commit a newer Live preview.
-- The destination origin is allow-listed against loopback and Codespaces hosts and re-checked at commit time.
+- Loopback app origins are built in. A remote app origin must be an exact user-approved HTTPS origin; Chrome grants only that host, the worker registers `content.js` dynamically, and the exact origin (including port) is re-checked before cookies or imports are sent.
 - Diagnostic logs are redacted and emitted as text (a structure summary plus JSON), never as objects — console copy renders a logged object as `[object Object]`.
 
 > The cloud API is undocumented and gated behind PocketTube's paid plan. HTTP 402 is reported as "needs an active paid plan", 401/403 as expired credentials.
@@ -283,39 +283,39 @@ The application uses two separate authentication mechanisms:
 ### 6.1 Google OAuth 2.0 (for YouTube Data API + InnerTube)
 
 ```
-User clicks Sync → Backend checks token.json
-                       ↓
-               token.json exists?
-              ┌──── Yes ────┐
-              ↓              ↓
-       Load credentials    No → client_secret.json exists?
-              ↓                    ↓ Yes
-       Credentials valid?      Auto-start OAuth flow:
-              ↓                 1. Generate auth URL
-       Yes → Use               2. Start callback server on port 8085
-              ↓                 3. Frontend opens auth URL in new tab
-       No (expired) →          4. User signs in, Google redirects
-       Refresh token              to localhost:8085
-              ↓                 5. Backend captures token, saves
-       Refresh failed?             token.json
-              ↓ Yes             6. Frontend auto-starts sync
-       Delete token.json
-       Auto-start OAuth flow
+Sync → valid token.json? → yes → use credentials
+          ↓ no/refresh failed
+Bind localhost:8085 listener → generate and publish auth URL
+       ↓
+Google consent → http://localhost:8085/?state=...&code=...
+       ├─ same machine → loopback listener
+       └─ remote browser → extension relay → /api/auth/oauth/callback/
+                          ↓
+                validate state → atomic token save → sync
 ```
 
 **OAuth flow implementation details:**
-- Backend uses `InstalledAppFlow` from `google-auth-oauthlib`
-- Auth URL is generated with `flow.authorization_url(prompt='consent')`
-- A custom `http.server.HTTPServer` on port 8085 handles the callback
+- Backend uses `InstalledAppFlow` from `google-auth-oauthlib` with a Desktop OAuth client
+- The loopback listener must bind successfully before `flow.authorization_url(prompt='consent')` is called or the auth URL/Flow/state is published
+- Google's redirect remains exactly `http://localhost:8085/`, as required by the installed-app client
+- A custom `http.server.HTTPServer` bound to `localhost:8085` handles same-machine callbacks
 - `OAUTHLIB_INSECURE_TRANSPORT=1` is set to allow `http://localhost` callback
-- The callback handler loops until it receives a request with `?code=` or `?error=`
+- For a remote browser, extension 2.5 observes only a top-level exact loopback callback, removes the callback URL from the tab, and posts it to the configured HTTPS app origin
+- `POST /api/auth/oauth/callback/` validates the URL, query shape, OAuth state and active in-memory Flow before exchanging the code
+- Callback exchange, credential refresh and logout share a generation lock; credentials are written atomically and logout cannot be undone by an in-flight callback or refresh
 - Frontend polls `GET /api/auth/oauth/` every 2s to detect completion
 - On completion, frontend automatically triggers sync
+
+**Operational constraints:**
+- An in-progress Flow is process-local. OAuth must run through one Django process; a restart or another worker invalidates the pending callback.
+- Remote relay requires the companion extension, a configured exact HTTPS app origin, Chrome host permission for that origin and network reachability from the browser machine.
+- This OAuth grant belongs to the server's shared YouTube integration. It does not identify or authenticate browser/API callers and therefore is not a replacement for application authentication.
 
 **API endpoints:**
 - `GET /api/auth/oauth/` — status: `{authenticated, in_progress, auth_url, error}`
 - `POST /api/auth/oauth/` — start OAuth flow, returns auth URL
-- `DELETE /api/auth/oauth/` — delete token.json
+- `POST /api/auth/oauth/callback/` — complete a pending flow from the extension relay
+- `DELETE /api/auth/oauth/` — atomically cancel the pending flow and delete `token.json`
 
 ### 6.2 YouTube Browser Session (for mark-as-watched via Chrome Extension)
 

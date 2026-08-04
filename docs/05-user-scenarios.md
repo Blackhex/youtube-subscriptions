@@ -15,7 +15,7 @@
 | Video play queue | Feeds | Queue views + Lounge API | `<QueueColumn>` with `@dnd-kit` + `useCast()` |
 | Google Cast playback | Feeds | Lounge bind/setPlaylist/nowPlaying | Cast SDK + MDX via `useCast()` hook |
 | Mark as watched | Feeds | `MarkWatchedView` + `YouTubeCookieAPI` (Playwright) | Eye icon on `<VideoItem>` |
-| OAuth sign-in | All | `OAuthView` + `start_oauth()` (callback on port 8085) | Smart Sync button + auto-open auth tab |
+| OAuth sign-in | All | `OAuthView` + state-bound callback completion | Smart Sync button + extension relay for a remote browser |
 | YouTube session (cookies) | Feeds | `YouTubeSessionCookiesView` + Chrome extension | Automatic via mark-as-watched |
 | Playlist management | Playlists | YouTube playlist API views | `<PlaylistColumn>` with `@dnd-kit` |
 | Thumbnail caching | All | `FileResponse` serving cached thumbnails | `<img>` tags with API proxy URLs |
@@ -38,7 +38,7 @@
 4. User opens `http://localhost:8001` (Vite dev server) → React app loads, Feeds section shown (empty)
 5. User clicks Sync button (top-right)
 6. React calls `POST /api/sync/all/` → Django backend detects no `token.json` → starts OAuth flow
-7. Browser opens Google consent screen → user authorizes YouTube access
+7. Browser opens Google consent screen → user authorizes YouTube access. If the browser is on another machine, extension 2.5 relays Google's loopback callback to the configured HTTPS app origin.
 8. `token.json` is saved
 9. Background sync begins:
    - Phase 1: Fetches all subscriptions via Data API v3 + InnerTube supplement
@@ -336,7 +336,7 @@
 
 ### Scenario 14: OAuth Sign-In Flow
 
-**Precondition:** `client_secret.json` exists, `token.json` does not (first use or token deleted).
+**Precondition:** `client_secret.json` exists, `token.json` does not (first use or token deleted). For a browser on another machine, extension 2.5 is loaded and configured with the app's exact HTTPS origin.
 
 **Steps:**
 1. User clicks Sync button in Navbar
@@ -344,14 +344,22 @@
 3. Sync fails with error toast
 4. Frontend detects OAuth `in_progress` with `auth_url` → auto-opens Google sign-in in new tab
 5. User signs in to Google, approves YouTube access
-6. Google redirects to `localhost:8085` → backend captures token, saves `token.json`
-7. Frontend polls `GET /api/auth/oauth/` → detects `authenticated=true`
-8. Frontend auto-starts sync
+6. Google redirects to the Desktop client's exact `http://localhost:8085/` callback
+7. If browser and backend share a machine, the loopback listener completes the flow. Otherwise, the extension validates and scrubs the callback tab, then relays the callback to `POST /api/auth/oauth/callback/` on the configured HTTPS app origin.
+8. Backend validates state against the original in-memory Flow, exchanges the code and atomically saves `token.json`
+9. Frontend polls `GET /api/auth/oauth/` → detects `authenticated=true`
+10. Frontend auto-starts sync
 
 **Token expiry:**
 - Token auto-refreshes via `creds.refresh()` on each use
 - If refresh fails, `token.json` is deleted and the OAuth flow restarts automatically on next sync
+- Logout invalidates the active Flow and deletes the token under one lock; a concurrent callback or refresh cannot recreate it
 - User sees the sign-in tab open again
+
+**Remote constraints:**
+- The app origin must be HTTPS and explicitly approved in the extension; loopback HTTP remains local-only.
+- Start and callback must reach the same Django process. Restarting the process cancels the pending sign-in.
+- This sign-in authorizes the server's YouTube account. It does not authenticate app/API users.
 
 **Expected Result:** Seamless OAuth flow integrated into the sync button — no separate auth UI needed.
 

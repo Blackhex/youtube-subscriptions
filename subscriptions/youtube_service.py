@@ -1,10 +1,12 @@
 import json
+import hmac
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import requests as http_requests
 from google.auth.transport.requests import Request
@@ -19,8 +21,13 @@ _oauth_state = {
     'in_progress': False,
     'auth_url': None,
     'error': None,
+    'flow': None,
+    'expected_state': None,
+    'phase': 'idle',
+    'generation': 0,
+    'completion_event': threading.Event(),
 }
-_oauth_lock = threading.Lock()
+_oauth_lock = threading.RLock()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Class 1: YouTube Data API v3
@@ -882,6 +889,11 @@ class YouTubeService:
     SCOPES = ['https://www.googleapis.com/auth/youtube']
     CLIENT_SECRETS_FILE = 'client_secret.json'
     TOKEN_FILE = 'token.json'
+    OAUTH_REDIRECT_URI = 'http://localhost:8085/'
+    OAUTH_CALLBACK_HOST = 'localhost'
+    OAUTH_CALLBACK_TIMEOUT = 300
+    MAX_CALLBACK_URL_LENGTH = 8192
+    MAX_CALLBACK_QUERY_LENGTH = 4096
 
     def __init__(self):
         self.credentials = self._get_credentials()
@@ -915,12 +927,221 @@ class YouTubeService:
     @classmethod
     def get_oauth_state(cls):
         """Return current OAuth status."""
+        with _oauth_lock:
+            in_progress = _oauth_state['in_progress']
+            auth_url = _oauth_state['auth_url']
+            error = _oauth_state['error']
         return {
             'authenticated': os.path.exists(cls.TOKEN_FILE),
-            'in_progress': _oauth_state['in_progress'],
-            'auth_url': _oauth_state['auth_url'],
-            'error': _oauth_state['error'],
+            'in_progress': in_progress,
+            'auth_url': auth_url,
+            'error': error,
         }
+
+    @classmethod
+    def _oauth_result(cls, error):
+        result = cls.get_oauth_state()
+        result['error'] = error
+        return result
+
+    @classmethod
+    def _cancel_oauth_locked(cls):
+        completion_event = _oauth_state['completion_event']
+        was_active = _oauth_state['in_progress'] or _oauth_state['phase'] in (
+            'starting',
+            'awaiting_callback',
+            'completing',
+        )
+        _oauth_state.update({
+            'in_progress': False,
+            'auth_url': None,
+            'error': 'OAuth authorization cancelled.' if was_active else None,
+            'flow': None,
+            'expected_state': None,
+            'phase': 'cancelled' if was_active else 'idle',
+            'generation': _oauth_state['generation'] + 1,
+        })
+        completion_event.set()
+
+    @classmethod
+    def cancel_oauth(cls):
+        """Cancel the process-local OAuth flow without deleting its token."""
+        with _oauth_lock:
+            cls._cancel_oauth_locked()
+            return cls.get_oauth_state()
+
+    @classmethod
+    def logout_oauth(cls):
+        """Cancel OAuth and delete its token as one credential-lock operation."""
+        with _oauth_lock:
+            cls._cancel_oauth_locked()
+            try:
+                os.remove(cls.TOKEN_FILE)
+            except FileNotFoundError:
+                pass
+            return cls.get_oauth_state()
+
+    @classmethod
+    def _parse_oauth_callback(cls, callback_url):
+        if not isinstance(callback_url, str) or len(callback_url) > cls.MAX_CALLBACK_URL_LENGTH:
+            raise ValueError('Invalid OAuth callback URL.')
+
+        parsed = urlparse(callback_url)
+        if (
+            parsed.scheme != 'http'
+            or parsed.netloc != 'localhost:8085'
+            or parsed.path != '/'
+            or parsed.params
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+            or len(parsed.query) > cls.MAX_CALLBACK_QUERY_LENGTH
+        ):
+            raise ValueError('Invalid OAuth callback URL.')
+        if re.search(r'%(?![0-9A-Fa-f]{2})', parsed.query):
+            raise ValueError('Malformed OAuth callback parameters.')
+
+        try:
+            pairs = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=20,
+            )
+        except ValueError as exc:
+            raise ValueError('Malformed OAuth callback parameters.') from exc
+
+        params = {}
+        for key, value in pairs:
+            if key in params:
+                raise ValueError('Duplicate OAuth callback parameter.')
+            params[key] = value
+
+        if not params.get('state'):
+            raise ValueError('OAuth callback is missing state.')
+        has_code = bool(params.get('code'))
+        has_error = bool(params.get('error'))
+        if has_code == has_error:
+            raise ValueError('OAuth callback must contain exactly one code or error.')
+        return params
+
+    @classmethod
+    def _save_credentials(cls, credentials):
+        token_path = os.path.abspath(cls.TOKEN_FILE)
+        token_dir = os.path.dirname(token_path)
+        file_descriptor, temp_path = tempfile.mkstemp(prefix='.token-', dir=token_dir, text=True)
+        try:
+            try:
+                os.fchmod(file_descriptor, 0o600)
+            except (AttributeError, OSError):
+                pass
+            with os.fdopen(file_descriptor, 'w') as token_file:
+                file_descriptor = None
+                token_file.write(credentials.to_json())
+                token_file.flush()
+                os.fsync(token_file.fileno())
+            os.replace(temp_path, token_path)
+            try:
+                os.chmod(token_path, 0o600)
+            except OSError:
+                pass
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    @classmethod
+    def complete_oauth(cls, callback_url):
+        """Validate an OAuth callback and complete the current flow exactly once."""
+        try:
+            params = cls._parse_oauth_callback(callback_url)
+        except ValueError as exc:
+            return cls._oauth_result(str(exc))
+
+        with _oauth_lock:
+            expected_state = _oauth_state['expected_state']
+            phase = _oauth_state['phase']
+            if phase in ('succeeded', 'denied', 'failed') and expected_state:
+                if hmac.compare_digest(params['state'], expected_state):
+                    return cls.get_oauth_state()
+            if not _oauth_state['in_progress'] or _oauth_state['flow'] is None:
+                return cls._oauth_result('No OAuth flow is awaiting this callback.')
+            if not expected_state or not hmac.compare_digest(params['state'], expected_state):
+                return cls._oauth_result('OAuth callback state did not match.')
+            if phase == 'completing':
+                return cls._oauth_result('OAuth completion is already in progress.')
+
+            flow = _oauth_state['flow']
+            generation = _oauth_state['generation']
+            completion_event = _oauth_state['completion_event']
+
+            if 'error' in params:
+                error = (
+                    'OAuth authorization was denied by the user.'
+                    if params['error'] == 'access_denied'
+                    else 'OAuth authorization failed.'
+                )
+                _oauth_state.update({
+                    'in_progress': False,
+                    'auth_url': None,
+                    'error': error,
+                    'flow': None,
+                    'phase': 'denied',
+                })
+                completion_event.set()
+                return cls.get_oauth_state()
+
+            _oauth_state['phase'] = 'completing'
+
+        try:
+            flow.fetch_token(authorization_response=callback_url)
+        except Exception as exc:
+            logger.error('OAuth token exchange failed (%s)', type(exc).__name__)
+            with _oauth_lock:
+                if (
+                    _oauth_state['generation'] == generation
+                    and _oauth_state['phase'] == 'completing'
+                ):
+                    _oauth_state.update({
+                        'in_progress': False,
+                        'auth_url': None,
+                        'error': 'OAuth token exchange failed.',
+                        'flow': None,
+                        'phase': 'failed',
+                    })
+                    completion_event.set()
+            return cls.get_oauth_state()
+
+        with _oauth_lock:
+            if not (
+                _oauth_state['generation'] == generation
+                and _oauth_state['phase'] == 'completing'
+            ):
+                return cls.get_oauth_state()
+            try:
+                cls._save_credentials(flow.credentials)
+            except Exception as exc:
+                logger.error('OAuth token exchange failed (%s)', type(exc).__name__)
+                _oauth_state.update({
+                    'in_progress': False,
+                    'auth_url': None,
+                    'error': 'OAuth token exchange failed.',
+                    'flow': None,
+                    'phase': 'failed',
+                })
+                completion_event.set()
+                return cls.get_oauth_state()
+            _oauth_state.update({
+                'in_progress': False,
+                'auth_url': None,
+                'error': None,
+                'flow': None,
+                'phase': 'succeeded',
+            })
+            completion_event.set()
+        logger.info('OAuth credentials saved successfully')
+        return cls.get_oauth_state()
 
     @classmethod
     def start_oauth(cls):
@@ -933,9 +1154,18 @@ class YouTubeService:
         with _oauth_lock:
             if _oauth_state['in_progress']:
                 return _oauth_state['auth_url']
-            _oauth_state['in_progress'] = True
-            _oauth_state['error'] = None
-            _oauth_state['auth_url'] = None
+            generation = _oauth_state['generation'] + 1
+            completion_event = threading.Event()
+            _oauth_state.update({
+                'in_progress': True,
+                'auth_url': None,
+                'error': None,
+                'flow': None,
+                'expected_state': None,
+                'phase': 'starting',
+                'generation': generation,
+                'completion_event': completion_event,
+            })
 
         def _run():
             try:
@@ -944,101 +1174,165 @@ class YouTubeService:
                 # Allow http://localhost for OAuth callback (safe for local dev)
                 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    cls.CLIENT_SECRETS_FILE, cls.SCOPES
-                )
-                flow.redirect_uri = 'http://localhost:8085/'
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                _oauth_state['auth_url'] = auth_url
-
                 # Custom callback handler — uses the SAME flow object
                 # so the state parameter matches
                 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
                     def do_GET(self):
-                        logger.info("OAuth callback received: %s", self.path)
+                        callback_url = f'http://localhost:8085{self.path}'
+                        result = cls.complete_oauth(callback_url)
+                        succeeded = (
+                            result['authenticated']
+                            and not result['in_progress']
+                            and result['error'] is None
+                        )
                         self.send_response(200)
                         self.send_header('Content-type', 'text/html')
                         self.end_headers()
-                        self.wfile.write(
-                            b'<html><body><h1>Sign-in complete!</h1>'
-                            b'<p>You can close this tab.</p></body></html>'
-                        )
-                        # Only capture if this is the actual OAuth callback (has ?code= or ?error=)
-                        if 'code=' in self.path or 'error=' in self.path:
-                            self.server.callback_url = f'http://localhost:8085{self.path}'
+                        if succeeded:
+                            self.wfile.write(
+                                b'<html><body><h1>Sign-in complete!</h1>'
+                                b'<p>You can close this tab.</p></body></html>'
+                            )
+                        else:
+                            self.wfile.write(
+                                b'<html><body><h1>Sign-in failed</h1>'
+                                b'<p>Return to the application and try again.</p></body></html>'
+                            )
 
                     def log_message(self, format, *args):
                         pass  # Suppress default request logs
 
-                server = http.server.HTTPServer(('', 8085), _CallbackHandler)
-                server.socket.setsockopt(
-                    __import__('socket').SOL_SOCKET,
-                    __import__('socket').SO_REUSEADDR, 1,
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    cls.CLIENT_SECRETS_FILE, cls.SCOPES
                 )
-                server.timeout = 300  # 5 minute timeout
-                server.callback_url = None
+                flow.redirect_uri = cls.OAUTH_REDIRECT_URI
 
-                # Handle requests until we get the OAuth callback
-                import time as _time
-                deadline = _time.time() + 300
-                while server.callback_url is None and _time.time() < deadline:
-                    server.timeout = max(1, deadline - _time.time())
-                    server.handle_request()
+                with http.server.HTTPServer(
+                    (cls.OAUTH_CALLBACK_HOST, 8085), _CallbackHandler
+                ) as server:
+                    server.socket.setsockopt(
+                        __import__('socket').SOL_SOCKET,
+                        __import__('socket').SO_REUSEADDR, 1,
+                    )
+                    with _oauth_lock:
+                        if (
+                            _oauth_state['generation'] != generation
+                            or not _oauth_state['in_progress']
+                        ):
+                            return
+                    auth_url, expected_state = flow.authorization_url(prompt='consent')
+                    with _oauth_lock:
+                        if (
+                            _oauth_state['generation'] != generation
+                            or not _oauth_state['in_progress']
+                        ):
+                            return
+                        _oauth_state.update({
+                            'auth_url': auth_url,
+                            'flow': flow,
+                            'expected_state': expected_state,
+                            'phase': 'awaiting_callback',
+                        })
 
-                if not server.callback_url:
-                    _oauth_state['error'] = 'OAuth callback timed out (5 minutes)'
-                    return
+                    deadline = time.monotonic() + cls.OAUTH_CALLBACK_TIMEOUT
+                    while not completion_event.is_set() and time.monotonic() < deadline:
+                        server.timeout = min(0.25, max(0, deadline - time.monotonic()))
+                        server.handle_request()
 
-                flow.fetch_token(authorization_response=server.callback_url)
-                creds = flow.credentials
-                with open(cls.TOKEN_FILE, 'w') as f:
-                    f.write(creds.to_json())
-                logger.info("OAuth credentials saved successfully")
-            except Exception as e:
-                logger.exception("OAuth flow failed")
-                _oauth_state['error'] = str(e)
-            finally:
                 with _oauth_lock:
-                    _oauth_state['in_progress'] = False
-                    _oauth_state['auth_url'] = None
+                    if (
+                        _oauth_state['generation'] == generation
+                        and _oauth_state['phase'] == 'awaiting_callback'
+                    ):
+                        _oauth_state.update({
+                            'in_progress': False,
+                            'auth_url': None,
+                            'error': 'OAuth callback timed out (5 minutes)',
+                            'flow': None,
+                            'phase': 'failed',
+                        })
+                        completion_event.set()
+            except Exception as exc:
+                logger.error('OAuth flow failed (%s)', type(exc).__name__)
+                with _oauth_lock:
+                    if (
+                        _oauth_state['generation'] == generation
+                        and _oauth_state['in_progress']
+                    ):
+                        _oauth_state.update({
+                            'in_progress': False,
+                            'auth_url': None,
+                            'error': 'OAuth flow failed.',
+                            'flow': None,
+                            'phase': 'failed',
+                        })
+                        completion_event.set()
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
 
         # Wait briefly for the auth URL to be generated
         for _ in range(50):  # 5 seconds max
-            if _oauth_state['auth_url']:
-                return _oauth_state['auth_url']
+            with _oauth_lock:
+                auth_url = _oauth_state['auth_url']
+                in_progress = _oauth_state['in_progress']
+            if auth_url:
+                return auth_url
+            if not in_progress:
+                return None
             time.sleep(0.1)
-        return _oauth_state['auth_url']
+        with _oauth_lock:
+            return _oauth_state['auth_url']
 
     def _get_credentials(self) -> Credentials:
         """Load or obtain OAuth credentials."""
-        creds = None
-        if os.path.exists(self.TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(self.TOKEN_FILE, self.SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                except Exception:
-                    os.remove(self.TOKEN_FILE)
-                    creds = None
-            if not creds:
-                if not os.path.exists(self.CLIENT_SECRETS_FILE):
-                    raise FileNotFoundError(
-                        f"OAuth client secrets file '{self.CLIENT_SECRETS_FILE}' not found. "
-                        "Download it from Google Cloud Console."
-                    )
-                # Auto-start OAuth flow if not already in progress
-                if not _oauth_state['in_progress']:
-                    self.start_oauth()
-                raise PermissionError(
-                    "YouTube OAuth credentials not available. "
-                    "Please sign in via the Google account icon in the app."
+        with _oauth_lock:
+            generation = _oauth_state['generation']
+            try:
+                creds = (
+                    Credentials.from_authorized_user_file(self.TOKEN_FILE, self.SCOPES)
+                    if os.path.exists(self.TOKEN_FILE)
+                    else None
                 )
-            with open(self.TOKEN_FILE, 'w') as f:
-                f.write(creds.to_json())
+            except FileNotFoundError:
+                creds = None
+
+        if creds and not creds.valid and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception:
+                with _oauth_lock:
+                    if _oauth_state['generation'] == generation:
+                        try:
+                            os.remove(self.TOKEN_FILE)
+                        except FileNotFoundError:
+                            pass
+                creds = None
+            else:
+                with _oauth_lock:
+                    if _oauth_state['generation'] != generation:
+                        raise PermissionError(
+                            "YouTube OAuth credentials were cancelled during refresh."
+                        )
+                    self._save_credentials(creds)
+
+        if not creds or not creds.valid:
+            with _oauth_lock:
+                cancelled = _oauth_state['generation'] != generation
+            if cancelled:
+                raise PermissionError(
+                    "YouTube OAuth credentials were cancelled while loading."
+                )
+            if not os.path.exists(self.CLIENT_SECRETS_FILE):
+                raise FileNotFoundError(
+                    f"OAuth client secrets file '{self.CLIENT_SECRETS_FILE}' not found. "
+                    "Download it from Google Cloud Console."
+                )
+            self.start_oauth()
+            raise PermissionError(
+                "YouTube OAuth credentials not available. "
+                "Please sign in via the Google account icon in the app."
+            )
         return creds
 
     # ── Retry logic (kept on facade for backward compat) ─────────────────

@@ -9,6 +9,8 @@ All endpoints are implemented using **Django REST Framework** (DRF). ViewSets ha
 ## Authentication
 All YouTube operations require OAuth 2.0 credentials. The server manages credentials via `client_secret.json` and `token.json` files. No API authentication is required for the local API itself (DRF's `AllowAny` permission).
 
+The Google OAuth grant authorizes the server's shared YouTube account; it does not authenticate the browser or API caller. A deployment exposed beyond a trusted local boundary still requires separate application authentication, restricted hosts/CORS, and HTTPS.
+
 Mark-as-watched additionally requires a YouTube browser session (cookie-based auth via Playwright), managed via the YouTube Session endpoints.
 
 ---
@@ -47,14 +49,56 @@ Start Google OAuth flow. Backend starts a callback listener on port 8085 and ret
 **Status values:** `started`, `already_authenticated`, `already_in_progress`
 
 **Flow:**
-1. Backend generates auth URL with `InstalledAppFlow.authorization_url()`
-2. Starts `HTTPServer` on port 8085 waiting for Google's callback
-3. Frontend opens `auth_url` in new tab → user signs in → Google redirects to `localhost:8085`
-4. Backend captures auth code, exchanges for token, saves `token.json`
-5. Frontend polls `GET /api/auth/oauth/` until `authenticated=true`
+1. Backend prepares the installed-app Flow without publishing it.
+2. A loopback-only `HTTPServer` binds and enters its context on port 8085. Bind failure terminates the flow without exposing an auth URL.
+3. Backend calls `InstalledAppFlow.authorization_url()` and publishes the URL, Flow and expected state while the listener is active.
+4. Frontend opens `auth_url` in a new tab → user signs in → Google redirects to `localhost:8085`.
+5. On the backend machine, the listener completes the callback directly. On a different browser machine, extension 2.5 relays the exact callback to `POST /api/auth/oauth/callback/` at the configured HTTPS app origin.
+6. Backend validates OAuth state, exchanges the code, and atomically saves `token.json`.
+7. Frontend polls `GET /api/auth/oauth/` until `authenticated=true`.
+
+An in-progress OAuth Flow is process-local. Start and completion must reach the same Django process, and a server restart invalidates the pending flow.
+
+### `POST /api/auth/oauth/callback/`
+Complete the active installed-app OAuth flow from the companion extension on a remote browser machine.
+
+**View:** `OAuthCallbackView(APIView)`
+
+**Request Body (JSON):**
+```json
+{
+  "callback_url": "http://localhost:8085/?state=...&code=..."
+}
+```
+
+The callback must use the exact loopback origin, port and path, contain one `state`, and contain exactly one `code` or `error`. URL and query sizes are bounded. Callback values are never echoed or logged.
+
+**Response (200):**
+```json
+{
+  "status": "completed",
+  "authenticated": true,
+  "in_progress": false,
+  "auth_url": null,
+  "error": null
+}
+```
+
+**Response (400):** malformed, stale, denied, mismatched-state, nonterminal, or failed token exchange:
+```json
+{
+  "status": "failed",
+  "authenticated": false,
+  "in_progress": false,
+  "auth_url": null,
+  "error": "Sanitized failure message"
+}
+```
+
+HTTP 200 requires an authenticated, terminal and error-free result. An older token never converts a rejected callback into success.
 
 ### `DELETE /api/auth/oauth/`
-Delete OAuth token (logout).
+Atomically cancel any pending OAuth flow and delete the OAuth token. Callback exchange and token refresh use the same generation lock, so an in-flight operation cannot recreate the token after logout.
 
 **Response (200):**
 ```json
@@ -63,9 +107,11 @@ Delete OAuth token (logout).
   "authenticated": false,
   "in_progress": false,
   "auth_url": null,
-  "error": null
+  "error": "OAuth authorization cancelled."
 }
 ```
+
+`error` is `null` when no flow was active; cancelling an active flow returns the message shown above.
 
 ---
 

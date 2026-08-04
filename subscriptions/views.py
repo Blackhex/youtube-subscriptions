@@ -18,7 +18,8 @@ from django.http import FileResponse, JsonResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser
+from rest_framework.exceptions import ParseError, UnsupportedMediaType
+from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
@@ -1451,9 +1452,115 @@ class OAuthView(APIView):
     def delete(self, request):
         """Delete OAuth token (logout)."""
         from .youtube_service import YouTubeService
-        if os.path.exists(YouTubeService.TOKEN_FILE):
-            os.remove(YouTubeService.TOKEN_FILE)
+        YouTubeService.logout_oauth()
         return Response({'status': 'ok', **YouTubeService.get_oauth_state()})
+
+
+class OAuthCallbackView(APIView):
+    """Complete a pending Google OAuth flow from a relayed callback URL."""
+
+    parser_classes = [JSONParser]
+    MAX_CALLBACK_URL_LENGTH = 8192
+    GENERIC_ERROR = 'OAuth completion failed.'
+    VIEW_CALLBACK_ERRORS = frozenset({
+        'OAuth callback request is too large.',
+        'OAuth callback request contains invalid JSON.',
+        'OAuth callback request has an unsupported media type.',
+        'callback_url must be a string.',
+        'callback_url must not be empty.',
+        'callback_url is too long.',
+    })
+    SERVICE_CALLBACK_ERRORS = frozenset({
+        'Invalid OAuth callback URL.',
+        'Malformed OAuth callback parameters.',
+        'Duplicate OAuth callback parameter.',
+        'OAuth callback is missing state.',
+        'OAuth callback must contain exactly one code or error.',
+        'No OAuth flow is awaiting this callback.',
+        'OAuth callback state did not match.',
+        'OAuth completion is already in progress.',
+        'OAuth authorization was denied by the user.',
+        'OAuth authorization failed.',
+        'OAuth token exchange failed.',
+        'OAuth authorization cancelled.',
+        'OAuth callback timed out (5 minutes)',
+        'OAuth flow failed.',
+    })
+    PUBLIC_CALLBACK_ERRORS = frozenset({GENERIC_ERROR}).union(
+        VIEW_CALLBACK_ERRORS,
+        SERVICE_CALLBACK_ERRORS,
+    )
+
+    @classmethod
+    def _failed_response(cls, error=None):
+        safe_error = (
+            error
+            if isinstance(error, str)
+            and len(error) <= 1024
+            and error in cls.PUBLIC_CALLBACK_ERRORS
+            else cls.GENERIC_ERROR
+        )
+        return Response(
+            {
+                'status': 'failed',
+                'authenticated': False,
+                'in_progress': False,
+                'auth_url': None,
+                'error': safe_error,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def post(self, request):
+        content_length = request.META.get('CONTENT_LENGTH')
+        try:
+            request_too_large = (
+                content_length is not None
+                and int(content_length) > settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+            )
+        except (TypeError, ValueError):
+            request_too_large = True
+        if request_too_large:
+            return self._failed_response('OAuth callback request is too large.')
+
+        try:
+            payload = request.data
+        except ParseError:
+            return self._failed_response('OAuth callback request contains invalid JSON.')
+        except UnsupportedMediaType:
+            return self._failed_response('OAuth callback request has an unsupported media type.')
+
+        callback_url = payload.get('callback_url') if isinstance(payload, dict) else None
+        if not isinstance(callback_url, str):
+            return self._failed_response('callback_url must be a string.')
+        if not callback_url:
+            return self._failed_response('callback_url must not be empty.')
+        if len(callback_url) > self.MAX_CALLBACK_URL_LENGTH:
+            return self._failed_response('callback_url is too long.')
+
+        from .youtube_service import YouTubeService
+        try:
+            result = YouTubeService.complete_oauth(callback_url)
+        except Exception:
+            return self._failed_response()
+
+        authenticated = result.get('authenticated') is True
+        error = result.get('error')
+        completed = (
+            authenticated
+            and result.get('in_progress') is False
+            and not error
+        )
+        if not completed:
+            return self._failed_response(error)
+
+        return Response({
+            'status': 'completed',
+            'authenticated': True,
+            'in_progress': False,
+            'auth_url': None,
+            'error': None,
+        })
 
 
 class YouTubeSessionView(APIView):

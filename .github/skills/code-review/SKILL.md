@@ -53,6 +53,10 @@ Compare implementation against design docs:
 - [ ] No path traversal in thumbnail cache file operations
 - [ ] CORS configured for local development only
 - [ ] OAuth tokens not logged or exposed in API responses
+- [ ] OAuth callback URL/code/state are never logged, echoed, persisted, or left in extension destination URLs
+- [ ] Remote installed-app callback relay requires exact top-level loopback callback, configured HTTPS origin, current host permission, bounded I/O, and redirect refusal
+- [ ] OAuth callback exchange, refresh, and logout generation races cannot recreate a deleted token
+- [ ] Server-side YouTube OAuth is not mistaken for browser/API caller authentication
 
 ### 5. Consistency Checks
 - [ ] All icons use @mui/icons-material (no Unicode emojis)

@@ -32,7 +32,7 @@ importScripts('pockettube-live.js');
 // travels with the worker source can. On startup the worker compares the two
 // and reloads itself once (see maybeHealStaleWorker); the popup shows both and
 // shouts when they disagree.
-const WORKER_BUILD = '2.4';
+const WORKER_BUILD = '2.5';
 
 // A content script's sender origin is set by the browser and cannot be forged
 // by the page, so it — not the page-supplied appOrigin — decides who may read
@@ -169,6 +169,11 @@ const IMPORT_TIMEOUT_MS = 120000;
 // Reading the app's current categories is a small, local GET.
 const APP_QUERY_TIMEOUT_MS = 15000;
 const MAX_CATEGORIES_RESPONSE_BYTES = 4 * 1024 * 1024;
+const OAUTH_CALLBACK_URL_MAX_LENGTH = 8192;
+const OAUTH_CALLBACK_QUERY_MAX_LENGTH = 4096;
+const OAUTH_RELAY_RESPONSE_MAX_BYTES = 16 * 1024;
+const OAUTH_RELAY_TIMEOUT_MS = 15000;
+const oauthRelayTabs = new Map();
 
 // The backend defaults to 'replace', which DELETES every category and every
 // assignment before rebuilding them. The mode is always sent explicitly so a
@@ -568,6 +573,150 @@ async function getAppOrigin() {
     throw new Error(`Chrome access to ${origin} is not granted.`);
   }
   return origin;
+}
+
+function parseOAuthCallback(value) {
+  if (typeof value !== 'string' || value.length > OAUTH_CALLBACK_URL_MAX_LENGTH) return null;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (error) {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' || parsed.hostname !== 'localhost' ||
+      parsed.port !== '8085' || parsed.pathname !== '/' ||
+      parsed.username || parsed.password || parsed.hash ||
+      parsed.search.slice(1).length > OAUTH_CALLBACK_QUERY_MAX_LENGTH) {
+    return null;
+  }
+  const state = parsed.searchParams.getAll('state');
+  const code = parsed.searchParams.getAll('code');
+  const oauthError = parsed.searchParams.getAll('error');
+  if (state.length !== 1 || !state[0] ||
+      (code.length === 1 && !!code[0]) === (oauthError.length === 1 && !!oauthError[0])) {
+    return null;
+  }
+  if ((code.length && (code.length !== 1 || !code[0])) ||
+      (oauthError.length && (oauthError.length !== 1 || !oauthError[0]))) {
+    return null;
+  }
+  return value;
+}
+
+function isRemoteHttpsOrigin(origin) {
+  const parsed = new URL(origin);
+  return parsed.protocol === 'https:' &&
+    parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1';
+}
+
+function isTerminalOAuthRelayResponse(status, data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const keys = Object.keys(data).sort();
+  const expectedKeys = ['auth_url', 'authenticated', 'error', 'in_progress', 'status'];
+  if (keys.length !== expectedKeys.length ||
+      keys.some((key, index) => key !== expectedKeys[index]) ||
+      data.in_progress !== false || data.auth_url !== null) {
+    return false;
+  }
+  if (status === 200) {
+    return data.status === 'completed' && data.authenticated === true && data.error === null;
+  }
+  return status === 400 && data.status === 'failed' && data.authenticated === false &&
+    typeof data.error === 'string' && data.error.length > 0 && data.error.length <= 1024;
+}
+
+async function configuredAppOrigin() {
+  const stored = await chrome.storage.local.get('appOrigin');
+  return validateAndNormaliseOrigin(stored.appOrigin || DEFAULT_APP_ORIGIN);
+}
+
+async function currentRemoteRelayOrigin(expectedOrigin) {
+  const current = await configuredAppOrigin();
+  if (current !== expectedOrigin || !isRemoteHttpsOrigin(current)) return null;
+
+  return (await hasOriginAccess(current)) ? current : null;
+}
+
+async function scrubOAuthCallbackTab(tabId) {
+  let destination = 'about:blank';
+  try {
+    destination = `${await configuredAppOrigin()}/`;
+  } catch (error) {
+    // A deterministic extension-safe destination is used when configuration
+    // cannot be read or validated. The callback URL is never reused here.
+  }
+  try {
+    await chrome.tabs.update(tabId, { url: destination });
+    return true;
+  } catch (error) {
+    try {
+      await chrome.tabs.remove(tabId);
+      return true;
+    } catch (removeError) {
+      return false;
+    }
+  }
+}
+
+async function relayOAuthCallback(details, callbackUrl) {
+  let expectedOrigin;
+  try {
+    expectedOrigin = await configuredAppOrigin();
+  } catch (error) {
+    return;
+  }
+  if (!isRemoteHttpsOrigin(expectedOrigin)) return;
+
+  if (!(await scrubOAuthCallbackTab(details.tabId))) return;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OAUTH_RELAY_TIMEOUT_MS);
+  try {
+    let origin;
+    try {
+      origin = await currentRemoteRelayOrigin(expectedOrigin);
+    } catch (error) {
+      return;
+    }
+    if (!origin) return;
+    let response;
+    try {
+      response = await fetch(`${origin}/api/auth/oauth/callback/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_url: callbackUrl }),
+        redirect: 'error',
+        signal: controller.signal,
+      });
+    } catch (error) {
+      return;
+    }
+
+    let data;
+    try {
+      const text = await readCappedText(
+        response, OAUTH_RELAY_RESPONSE_MAX_BYTES, 'OAuth relay response'
+      );
+      data = JSON.parse(text);
+    } catch (error) {
+      return;
+    }
+    if (!isTerminalOAuthRelayResponse(response.status, data)) return;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function handleOAuthCallbackNavigation(details) {
+  if (!details || details.frameId !== 0 || !Number.isInteger(details.tabId)) return;
+  const callbackUrl = parseOAuthCallback(details.url);
+  if (!callbackUrl || oauthRelayTabs.has(details.tabId)) return;
+
+  const relay = relayOAuthCallback(details, callbackUrl).finally(() => {
+    if (oauthRelayTabs.get(details.tabId) === relay) oauthRelayTabs.delete(details.tabId);
+  });
+  oauthRelayTabs.set(details.tabId, relay);
+  return relay;
 }
 
 function credentialsError(detail) {
@@ -1548,6 +1697,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
   }
 });
+
+chrome.webNavigation.onBeforeNavigate.addListener(handleOAuthCallbackNavigation);
 
 chrome.runtime.onInstalled.addListener(() => {
   getAppOrigin().then(ensureAppBridgeRegistration).catch((error) => {

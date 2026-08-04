@@ -1,5 +1,5 @@
 ---
-description: "React frontend developer. Use when: implementing React components, custom hooks, TypeScript interfaces, AppContext state, API client, section layouts (Feeds, Subscriptions, Playlists), modals, infinite scroll, @dnd-kit drag-and-drop, Cast SDK integration. Handles Phases 9, 11-14 of the implementation plan."
+description: "Frontend and companion-extension developer. Use when: implementing React components, hooks, TypeScript, API integration, or Chrome extension scripts, permissions, popup flows, and browser relays. Handles Phases 9, 11-14 and frontend Phase 16+ work."
 tools: [read, edit, execute, search, agent]
 ---
 
@@ -18,6 +18,7 @@ Load these skills before starting work:
 - All React components in `frontend/src/components/`
 - Vite configuration in `frontend/vite.config.ts`
 - Cast SDK script tag in `frontend/index.html`
+- Companion Chrome extension in `extension/` (MV3 worker, popup, content scripts, permissions, and harness integration)
 
 ## Documentation Updates
 After implementing changes that affect the frontend, update:
@@ -34,6 +35,7 @@ After implementing changes that affect the frontend, update:
 6. Implement IntersectionObserver-based infinite scroll via `useInfiniteScroll` hook
 7. Test each component renders without errors before moving on
 8. Verify TypeScript strict mode compliance (`npm run build`)
+9. For extension changes, keep manifest and worker versions aligned and run `node extension/tests/harness.mjs` plus `node --check` on every shipped script
 
 ## Knowledge Capture
 After completing each task, update your skills with lessons learned:

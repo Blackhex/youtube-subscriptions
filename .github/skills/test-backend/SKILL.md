@@ -28,6 +28,7 @@ subscriptions/
     ├── test_views_feeds.py
     ├── test_views_queue.py
     ├── test_views_sync.py
+    ├── test_views_oauth.py
     ├── test_sync.py
     ├── test_suggestions.py
     └── test_youtube_service.py
@@ -128,6 +129,16 @@ def test_fetch_subscriptions(self, mock_build, mock_creds):
 def test_gemini_suggestions(self, mock_post):
     mock_post.return_value.json.return_value = { ... }
 ```
+
+    ## Testing OAuth Callback and Credential Races
+
+    - Redirect every token write to a temporary `TOKEN_FILE`; never touch the developer's real `token.json`.
+    - Test exact callback URL/query boundaries, duplicate decoded parameters, state mismatch, denial, token-exchange failure and idempotent success.
+    - Use events/barriers to force callback-vs-logout and refresh-vs-logout interleavings. Assert stale operations cannot recreate the token.
+    - Verify logout invalidates Flow generation and deletes the token under one lock.
+    - Mock `HTTPServer` and assert it binds to `localhost`, never `''` or `0.0.0.0`.
+    - API callback success requires authenticated + terminal + error-free state; a pre-existing token with a callback error must still return HTTP 400.
+    - Assert callback URL, code, state, token and raw exceptions never appear in responses, public state or logs.
 
 ## Running Tests
 ```bash

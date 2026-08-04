@@ -25,6 +25,12 @@ description: "YouTube API integration for YouTube Subscriptions Organizer. Use w
 - Scope: `https://www.googleapis.com/auth/youtube`
 - Token cached in `token.json`, auto-refresh on expiry
 - If refresh fails, delete token and re-run OAuth flow
+- Desktop-client redirect remains exactly `http://localhost:8085/`
+- Same-machine callbacks use a loopback-only listener; remote-browser callbacks are relayed by extension 2.5 to `POST /api/auth/oauth/callback/`
+- The callback URL, decoded parameters and OAuth state are strictly bounded and validated against the original in-memory Flow
+- Callback exchange, refresh and logout use generation checks; token persistence is atomic and logout holds the lock through token deletion
+- Pending Flow state is process-local, so start and completion must reach one Django process
+- The YouTube grant authorizes the server account and must never be treated as browser/API authentication
 
 ### Key Endpoints
 - `youtube.subscriptions().list(mine=True)` — paginated with pageToken
@@ -98,9 +104,18 @@ YouTube watch history recording requires browser session cookies (SAPISIDHASH), 
 A companion Chrome extension (`extension/` directory) provides these cookies.
 
 ### Extension Architecture (MV3)
-- `manifest.json`: `cookies` permission for `*.youtube.com`, content script for `localhost`/codespaces
+- `manifest.json`: permanent YouTube/loopback access, optional remote HTTPS host access, `scripting`, and `webNavigation`
 - `background.js`: reads YouTube cookies via `chrome.cookies.getAll()`, converts to Playwright format
-- `content.js`: bridges web page ↔ extension via `window.postMessage`
+- `content.js`: dynamically registered bridge for the exact configured app origin
+
+### Remote OAuth Callback Relay
+1. Google redirects the Desktop client to `http://localhost:8085/`
+2. For a remote HTTPS app origin, `webNavigation.onBeforeNavigate` accepts only the exact top-level callback shape
+3. The worker scrubs the callback tab (or closes it) before transmitting callback data
+4. It re-checks configured origin and Chrome host permission, then POSTs only to `{origin}/api/auth/oauth/callback/` with redirects disabled and bounded I/O
+5. Only an authenticated, terminal, error-free backend response is success; local app origins bypass the relay
+
+Never log, store, badge, or place the callback URL, code, state, or query in a destination URL. If tab scrubbing and closing both fail, abort the relay.
 
 ### Cookie Sync Flow
 1. Frontend sends `YT_SUBS_GET_COOKIES` message via `window.postMessage`

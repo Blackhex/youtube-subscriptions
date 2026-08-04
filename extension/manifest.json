@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "YouTube Subscriptions Helper",
-  "version": "2.4",
+  "version": "2.5",
   "description": "Syncs YouTube cookies to the YouTube Subscriptions Organizer app and imports PocketTube channel categories from live YouTube data or a PocketTube cloud backup.",
   "permissions": [
     "cookies",
     "contextMenus",
     "scripting",
-    "storage"
+    "storage",
+    "webNavigation"
   ],
   "host_permissions": [
     "https://*.youtube.com/*",

@@ -43,6 +43,7 @@ Load this skill before starting work:
 - Mock external API calls (YouTube, Gemini) via `page.route()`
 - Implement file upload/download tests for PocketTube import/export
 - Test infinite scroll, sidebar resize, sync progress UI
+- Validate cross-machine contracts synthetically (extension relay → Django callback → frontend poll) without using real Google tokens
 
 ## Approach
 1. Read the test-e2e skill for setup, directory structure, and scenario mapping

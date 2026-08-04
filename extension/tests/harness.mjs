@@ -28,9 +28,11 @@ async function test(name, run) {
 
 // --- loaders -----------------------------------------------------------------
 
-function loadBackground(chromeStub, fetchStub) {
+function loadBackground(chromeStub, fetchStub, timers = {}) {
   const src = fs.readFileSync(path.join(extensionDir, 'background.js'), 'utf8');
   const selfStub = { crypto: globalThis.crypto };
+  const setTimeoutStub = timers.setTimeout || globalThis.setTimeout;
+  const clearTimeoutStub = timers.clearTimeout || globalThis.clearTimeout;
   // background.js pulls the live transform in with importScripts(); in a real
   // service worker that is a global, here it is an injected parameter.
   const importScripts = (...files) => {
@@ -39,7 +41,8 @@ function loadBackground(chromeStub, fetchStub) {
       new Function('self', libSrc)(selfStub);
     });
   };
-  const factory = new Function('chrome', 'fetch', 'self', 'importScripts', `${src}
+  const factory = new Function(
+    'chrome', 'fetch', 'self', 'importScripts', 'setTimeout', 'clearTimeout', `${src}
     return {
       previewFromPocketTube,
       commitPreparedImport,
@@ -56,13 +59,19 @@ function loadBackground(chromeStub, fetchStub) {
       configureAppOrigin,
       ensureAppBridgeRegistration,
       getAppOrigin,
+      parseOAuthCallback,
+      isTerminalOAuthRelayResponse,
+      handleOAuthCallbackNavigation,
       startKeepalive,
       stopKeepalive,
       BACKUP_VERSION,
       WORKER_BUILD,
       live: self,
-    };`);
-  return factory(chromeStub, fetchStub, selfStub, importScripts);
+    };`
+  );
+  return factory(
+    chromeStub, fetchStub, selfStub, importScripts, setTimeoutStub, clearTimeoutStub
+  );
 }
 
 function loadContent(windowStub, chromeStub) {
@@ -431,6 +440,7 @@ function makeTabs(options = {}) {
     reply: options.reply || null,
     queryThrows: !!options.queryThrows,
     createThrows: !!options.createThrows,
+    updated: [],
   };
   const noopListeners = { addListener: () => {}, removeListener: () => {} };
   return {
@@ -446,7 +456,15 @@ function makeTabs(options = {}) {
       return tab;
     },
     get: async (id) => ({ id, status: 'complete' }),
-    remove: async (id) => { state.removed.push(id); },
+    remove: async (id) => {
+      state.removed.push(id);
+      if (options.removeThrows) throw new Error(options.removeError || 'could not remove tab');
+    },
+    update: async (id, changes) => {
+      state.updated.push({ id, changes });
+      if (options.updateThrows) throw new Error(options.updateError || 'could not update tab');
+      return { id, ...changes };
+    },
     sendMessage: async (tabId, message) => {
       state.sent.push({ tabId, message });
       if (typeof state.reply !== 'function') {
@@ -473,7 +491,12 @@ function makeChrome(overrides = {}) {
     storage: { local, session: makeStorageArea() },
     permissions: makePermissions(overrides),
     scripting: makeScripting(),
-    tabs: makeTabs(),
+    tabs: makeTabs(overrides.tabsOptions),
+    webNavigation: {
+      onBeforeNavigate: {
+        addListener: (fn) => { listeners.beforeNavigate = fn; },
+      },
+    },
     runtime: {
       lastError: null,
       onMessage: { addListener: (fn) => { listeners.message = fn; } },
@@ -1728,10 +1751,463 @@ await test('the manifest uses optional HTTPS access and no static app content sc
     'http://127.0.0.1/*',
   ]);
   assert.ok(MANIFEST.permissions.includes('scripting'));
+  assert.ok(MANIFEST.permissions.includes('webNavigation'));
   assert.ok(MANIFEST.content_scripts.every((entry) => !entry.js.includes('content.js')),
     'content.js is still statically injected');
   assert.ok(MANIFEST.content_scripts.some((entry) => entry.js.includes('pockettube-bridge.js')),
     'the YouTube PocketTube bridge was removed');
+});
+
+// --- background: remote OAuth callback relay --------------------------------
+
+const OAUTH_CALLBACK =
+  'http://localhost:8085/?state=private-state&code=private-code&scope=youtube';
+const OAUTH_SUCCESS = {
+  status: 'completed', authenticated: true, in_progress: false, auth_url: null, error: null,
+};
+const OAUTH_FAILURE = {
+  status: 'failed', authenticated: false, in_progress: false, auth_url: null,
+  error: 'OAuth callback state did not match.',
+};
+
+await test('terminal OAuth relay responses accept exactly the two authoritative shapes', async () => {
+  const { isTerminalOAuthRelayResponse } = loadBackground(makeChrome(), makeFetch());
+  const accepted = [
+    ['HTTP 200 completed', 200, OAUTH_SUCCESS],
+    ['HTTP 400 failed', 400, OAUTH_FAILURE],
+    ['HTTP 400 failed with 1024-character error', 400, {
+      ...OAUTH_FAILURE, error: 'x'.repeat(1024),
+    }],
+  ];
+
+  for (const [label, status, data] of accepted) {
+    assert.equal(isTerminalOAuthRelayResponse(status, data), true, label);
+  }
+});
+
+await test('terminal OAuth relay responses reject every non-authoritative shape', async () => {
+  const { isTerminalOAuthRelayResponse } = loadBackground(makeChrome(), makeFetch());
+  const without = (data, key) => Object.fromEntries(
+    Object.entries(data).filter(([candidate]) => candidate !== key)
+  );
+  const rejected = [
+    ['completed with wrong HTTP status', 201, OAUTH_SUCCESS],
+    ['failed with wrong HTTP status', 401, OAUTH_FAILURE],
+    ['failure authenticated true', 400, { ...OAUTH_FAILURE, authenticated: true }],
+    ['failure error empty', 400, { ...OAUTH_FAILURE, error: '' }],
+    ['failure error null', 400, { ...OAUTH_FAILURE, error: null }],
+    ['failure error non-string', 400, { ...OAUTH_FAILURE, error: 42 }],
+    ['failure error 1025 characters', 400, { ...OAUTH_FAILURE, error: 'x'.repeat(1025) }],
+    ['completed in progress', 200, { ...OAUTH_SUCCESS, in_progress: true }],
+    ['failed in progress', 400, { ...OAUTH_FAILURE, in_progress: true }],
+    ['completed with auth URL', 200, { ...OAUTH_SUCCESS, auth_url: 'https://example.test' }],
+    ['failed with auth URL', 400, { ...OAUTH_FAILURE, auth_url: 'https://example.test' }],
+    ['extra key', 200, { ...OAUTH_SUCCESS, callback_url: OAUTH_CALLBACK }],
+    ['missing key', 200, without(OAUTH_SUCCESS, 'error')],
+    ['array', 200, []],
+    ['null', 200, null],
+    ['string', 200, 'completed'],
+    ['number', 200, 200],
+    ['completed with error', 200, { ...OAUTH_SUCCESS, error: 'unexpected' }],
+    ['failed on HTTP 200', 200, OAUTH_FAILURE],
+    ['completed on HTTP 400', 400, OAUTH_SUCCESS],
+  ];
+
+  for (const [label, status, data] of rejected) {
+    assert.equal(isTerminalOAuthRelayResponse(status, data), false, label);
+  }
+});
+
+function relayFetch(response, options = {}) {
+  const calls = [];
+  let release;
+  const gate = options.pending ? new Promise((resolve) => { release = resolve; }) : null;
+  const fetchStub = async (url, init) => {
+    calls.push({ url, init });
+    if (options.waitForAbort) {
+      return new Promise((resolve, reject) => {
+        const rejectAborted = () => reject(new DOMException('timed out', 'AbortError'));
+        if (init.signal.aborted) rejectAborted();
+        else init.signal.addEventListener('abort', rejectAborted, { once: true });
+      });
+    }
+    if (gate) await gate;
+    if (options.error) throw new Error(options.error);
+    return typeof response === 'function' ? response() : response;
+  };
+  fetchStub.calls = calls;
+  fetchStub.release = release;
+  return fetchStub;
+}
+
+async function remoteRelay(response, options = {}) {
+  const origin = options.origin || 'https://app.home.example:8443';
+  const parsed = new URL(origin);
+  const permission = `${parsed.protocol}//${parsed.hostname}/*`;
+  const chromeStub = makeChrome({
+    grantedOrigins: [permission],
+    tabsOptions: options.tabsOptions,
+  });
+  await chromeStub.storage.local.set({ appOrigin: origin });
+  const fetchStub = options.fetchStub || relayFetch(response);
+  const bg = loadBackground(chromeStub, fetchStub);
+  await settle();
+  return { bg, chromeStub, fetchStub, origin, permission };
+}
+
+await test('manifest and worker are 2.5 with the minimal navigation permission', async () => {
+  const { bg, chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
+  assert.equal(MANIFEST.version, '2.5');
+  assert.equal(bg.WORKER_BUILD, MANIFEST.version);
+  assert.equal(MANIFEST.permissions.filter((permission) => permission === 'webNavigation').length, 1);
+  assert.equal(typeof chromeStub._listeners.beforeNavigate, 'function',
+    'the callback listener was not installed at worker load');
+});
+
+await test('remote OAuth success relays only the exact callback and replaces the same tab', async () => {
+  const { chromeStub, fetchStub, origin } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
+  await chromeStub._listeners.beforeNavigate({ tabId: 41, frameId: 0, url: OAUTH_CALLBACK });
+
+  assert.equal(fetchStub.calls.length, 1);
+  const call = fetchStub.calls[0];
+  assert.equal(call.url, `${origin}/api/auth/oauth/callback/`);
+  assert.equal(call.init.method, 'POST');
+  assert.equal(call.init.redirect, 'error');
+  assert.deepEqual(call.init.headers, { 'Content-Type': 'application/json' });
+  assert.deepEqual(JSON.parse(call.init.body), { callback_url: OAUTH_CALLBACK });
+  assert.ok(call.init.signal instanceof AbortSignal);
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 41, changes: { url: `${origin}/` } }]);
+});
+
+await test('a valid OAuth denial response still clears the callback tab safely', async () => {
+  const callback = 'http://localhost:8085/?state=private-state&error=access_denied';
+  const { chromeStub, fetchStub, origin } = await remoteRelay(
+    jsonResponse(OAUTH_FAILURE, { status: 400 })
+  );
+  await chromeStub._listeners.beforeNavigate({ tabId: 42, frameId: 0, url: callback });
+  assert.deepEqual(JSON.parse(fetchStub.calls[0].init.body), { callback_url: callback });
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 42, changes: { url: `${origin}/` } }]);
+});
+
+await test('an update failure closes the callback tab before relaying', async () => {
+  const { chromeStub, fetchStub, origin } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), {
+    tabsOptions: {
+      updateThrows: true,
+      updateError: 'update failed private-code private-state',
+    },
+  });
+  const beforeStorage = {
+    local: await chromeStub.storage.local.get(null),
+    session: await chromeStub.storage.session.get(null),
+  };
+  let surfacedError = null;
+  const captured = await captureConsole(async () => {
+    try {
+      await chromeStub._listeners.beforeNavigate({
+        tabId: 44, frameId: 0, url: OAUTH_CALLBACK,
+      });
+    } catch (error) {
+      surfacedError = error;
+    }
+  });
+  const afterStorage = {
+    local: await chromeStub.storage.local.get(null),
+    session: await chromeStub.storage.session.get(null),
+  };
+  const observable = JSON.stringify({
+    logs: captured.lines,
+    storage: afterStorage,
+    destinations: chromeStub.tabs._state.updated,
+    surfacedError: surfacedError?.message || null,
+  });
+
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 44, changes: { url: `${origin}/` } }]);
+  assert.deepEqual(chromeStub.tabs._state.removed, [44]);
+  assert.equal(fetchStub.calls.length, 1);
+  assert.deepEqual(JSON.parse(fetchStub.calls[0].init.body), { callback_url: OAUTH_CALLBACK });
+  assert.deepEqual(afterStorage, beforeStorage);
+  assert.equal(surfacedError, null);
+  assert.ok(!observable.includes('private-code'));
+  assert.ok(!observable.includes('private-state'));
+});
+
+await test('failed update and removal abort callback relay without exposing secrets', async () => {
+  const { chromeStub, fetchStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), {
+    tabsOptions: {
+      updateThrows: true,
+      removeThrows: true,
+      updateError: 'update failed private-code private-state',
+      removeError: 'remove failed private-code private-state',
+    },
+  });
+  const beforeStorage = {
+    local: await chromeStub.storage.local.get(null),
+    session: await chromeStub.storage.session.get(null),
+  };
+  let surfacedError = null;
+  const captured = await captureConsole(async () => {
+    try {
+      await chromeStub._listeners.beforeNavigate({
+        tabId: 45, frameId: 0, url: OAUTH_CALLBACK,
+      });
+    } catch (error) {
+      surfacedError = error;
+    }
+  });
+  const afterStorage = {
+    local: await chromeStub.storage.local.get(null),
+    session: await chromeStub.storage.session.get(null),
+  };
+  const observable = JSON.stringify({
+    logs: captured.lines,
+    storage: afterStorage,
+    destinations: chromeStub.tabs._state.updated,
+    surfacedError: surfacedError?.message || null,
+  });
+
+  assert.equal(fetchStub.calls.length, 0);
+  assert.deepEqual(chromeStub.tabs._state.removed, [45]);
+  assert.deepEqual(afterStorage, beforeStorage);
+  assert.equal(surfacedError, null);
+  assert.ok(!observable.includes('private-code'));
+  assert.ok(!observable.includes('private-state'));
+});
+
+await test('local configured origins leave OAuth callbacks to the backend listener', async () => {
+  for (const origin of ['http://localhost:8001', 'http://127.0.0.1:8001']) {
+    const chromeStub = makeChrome();
+    await chromeStub.storage.local.set({ appOrigin: origin });
+    const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
+    loadBackground(chromeStub, fetchStub);
+    await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+    assert.equal(fetchStub.calls.length, 0);
+    assert.deepEqual(chromeStub.tabs._state.updated, []);
+  }
+});
+
+await test('non-exact OAuth callback locations and subframes are ignored', async () => {
+  const { chromeStub, fetchStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
+  const ignored = [
+    'https://localhost:8085/?state=s&code=c',
+    'http://example.com:8085/?state=s&code=c',
+    'http://127.0.0.1:8085/?state=s&code=c',
+    'http://localhost:8086/?state=s&code=c',
+    'http://localhost:8085/callback?state=s&code=c',
+    'http://localhost:8085/?state=s&code=c#fragment',
+    'http://user@localhost:8085/?state=s&code=c',
+  ];
+  for (const [index, url] of ignored.entries()) {
+    await chromeStub._listeners.beforeNavigate({ tabId: 50 + index, frameId: 0, url });
+  }
+  await chromeStub._listeners.beforeNavigate({ tabId: 60, frameId: 1, url: OAUTH_CALLBACK });
+  assert.equal(fetchStub.calls.length, 0);
+});
+
+await test('malformed, ambiguous, and oversized OAuth callbacks are ignored', async () => {
+  const { chromeStub, fetchStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
+  const ignored = [
+    'not a url',
+    'http://localhost:8085/?code=c',
+    'http://localhost:8085/?state=s',
+    'http://localhost:8085/?state=&code=c',
+    'http://localhost:8085/?state=s&code=',
+    'http://localhost:8085/?state=s&error=',
+    'http://localhost:8085/?state=s&state=t&code=c',
+    'http://localhost:8085/?state=s&code=c&code=d',
+    'http://localhost:8085/?state=s&error=x&error=y',
+    'http://localhost:8085/?state=s&code=c&error=x',
+    `http://localhost:8085/?state=s&code=c&padding=${'x'.repeat(8192)}`,
+  ];
+  for (const [index, url] of ignored.entries()) {
+    await chromeStub._listeners.beforeNavigate({ tabId: 70 + index, frameId: 0, url });
+  }
+  assert.equal(fetchStub.calls.length, 0);
+});
+
+await test('OAuth callback query length 4096 is accepted and 4097 is ignored', async () => {
+  const callbackAtLength = (length) => {
+    const prefix = 'state=s&code=c&padding=';
+    assert.ok(length >= prefix.length);
+    const query = prefix + 'x'.repeat(length - prefix.length);
+    assert.equal(query.length, length);
+    return `http://localhost:8085/?${query}`;
+  };
+  const { chromeStub, fetchStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
+  await chromeStub._listeners.beforeNavigate({
+    tabId: 88, frameId: 0, url: callbackAtLength(4096),
+  });
+  await chromeStub._listeners.beforeNavigate({
+    tabId: 89, frameId: 0, url: callbackAtLength(4097),
+  });
+
+  assert.equal(fetchStub.calls.length, 1);
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 88, changes: { url: 'https://app.home.example:8443/' } }]);
+});
+
+await test('concurrent repeated navigation events relay once per tab', async () => {
+  const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS), { pending: true });
+  const { chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), { fetchStub });
+  const first = chromeStub._listeners.beforeNavigate({ tabId: 90, frameId: 0, url: OAUTH_CALLBACK });
+  const duplicate = chromeStub._listeners.beforeNavigate({
+    tabId: 90, frameId: 0, url: OAUTH_CALLBACK,
+  });
+  await settle();
+  assert.equal(duplicate, undefined);
+  assert.equal(fetchStub.calls.length, 1);
+  fetchStub.release();
+  await first;
+  assert.equal(chromeStub.tabs._state.updated.length, 1);
+});
+
+await test('a completed relay releases its per-tab deduplication entry', async () => {
+  const { chromeStub, fetchStub } = await remoteRelay(() => jsonResponse(OAUTH_SUCCESS));
+  await chromeStub._listeners.beforeNavigate({ tabId: 91, frameId: 0, url: OAUTH_CALLBACK });
+  await chromeStub._listeners.beforeNavigate({ tabId: 91, frameId: 0, url: OAUTH_CALLBACK });
+  assert.equal(fetchStub.calls.length, 2);
+  assert.equal(chromeStub.tabs._state.updated.length, 2);
+});
+
+await test('network, redirect, read, size, and malformed relay failures still scrub once', async () => {
+  const unreadableResponse = {
+    status: 200,
+    headers: new Headers(),
+    body: null,
+    text: async () => { throw new Error('response read failed private-code'); },
+  };
+  const cases = [
+    ['network', relayFetch(null, { error: 'network failed private-state' })],
+    ['redirect', relayFetch(null, { error: 'redirect blocked private-code' })],
+    ['read', relayFetch(unreadableResponse)],
+    ['oversized', relayFetch(jsonResponse('x'.repeat(17 * 1024)))],
+    ['malformed shape', relayFetch(jsonResponse({ status: 'completed', authenticated: false }))],
+    ['extra response data', relayFetch(jsonResponse({
+      ...OAUTH_SUCCESS, callback_url: OAUTH_CALLBACK,
+    }))],
+  ];
+  for (const [index, [label, fetchStub]] of cases.entries()) {
+    const { chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), { fetchStub });
+    await chromeStub._listeners.beforeNavigate({ tabId: 100 + index, frameId: 0, url: OAUTH_CALLBACK });
+    assert.deepEqual(chromeStub.tabs._state.updated, [{
+      id: 100 + index, changes: { url: 'https://app.home.example:8443/' },
+    }], `${label} did not scrub exactly once`);
+  }
+});
+
+await test('OAuth relay timeout scrubs once without claiming authentication success', async () => {
+  const fetchStub = relayFetch(null, { waitForAbort: true });
+  const chromeStub = makeChrome({ grantedOrigins: ['https://app.home.example/*'] });
+  await chromeStub.storage.local.set({ appOrigin: 'https://app.home.example' });
+  const timers = {
+    setTimeout: (callback, delay) => {
+      if (delay === 15000) queueMicrotask(callback);
+      return 1;
+    },
+    clearTimeout: () => {},
+  };
+  loadBackground(chromeStub, fetchStub, timers);
+  await settle();
+  const relay = chromeStub._listeners.beforeNavigate({
+    tabId: 110, frameId: 0, url: OAUTH_CALLBACK,
+  });
+  await relay;
+
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 110, changes: { url: 'https://app.home.example/' } }]);
+  assert.deepEqual(await chromeStub.storage.local.get(null), {
+    appOrigin: 'https://app.home.example', importSource: 'cloud',
+  });
+});
+
+await test('origin changes and permission loss before send scrub but prevent callback leakage', async () => {
+  for (const mode of ['origin', 'permission', 'permission-error']) {
+    const origin = 'https://app.home.example';
+    const permission = 'https://app.home.example/*';
+    const chromeStub = makeChrome({ grantedOrigins: [permission] });
+    await chromeStub.storage.local.set({ appOrigin: origin });
+    const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
+    loadBackground(chromeStub, fetchStub);
+    await settle();
+    if (mode === 'origin') {
+      const realGet = chromeStub.storage.local.get;
+      let reads = 0;
+      chromeStub.storage.local.get = async (key) => {
+        const stored = await realGet(key);
+        if (key === 'appOrigin' && ++reads === 2) {
+          await chromeStub.storage.local.set({ appOrigin: 'https://other.example' });
+          return { appOrigin: 'https://other.example' };
+        }
+        return stored;
+      };
+    } else {
+      chromeStub.permissions.contains = async () => {
+        chromeStub.permissions._granted.delete(permission);
+        if (mode === 'permission-error') throw new Error('permission check unavailable');
+        return false;
+      };
+    }
+    await chromeStub._listeners.beforeNavigate({ tabId: 120, frameId: 0, url: OAUTH_CALLBACK });
+    assert.equal(fetchStub.calls.length, 0, `${mode} change leaked the callback`);
+    assert.equal(chromeStub.tabs._state.updated.length, 1, `${mode} did not scrub once`);
+    assert.ok(!chromeStub.tabs._state.updated[0].changes.url.includes('private-'));
+  }
+});
+
+await test('an unavailable configured origin uses the deterministic scrub fallback', async () => {
+  const origin = 'https://app.home.example';
+  const chromeStub = makeChrome({ grantedOrigins: [`${origin}/*`] });
+  await chromeStub.storage.local.set({ appOrigin: origin });
+  const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
+  loadBackground(chromeStub, fetchStub);
+  await settle();
+
+  const realGet = chromeStub.storage.local.get;
+  let reads = 0;
+  chromeStub.storage.local.get = async (key) => {
+    if (key === 'appOrigin' && ++reads > 1) throw new Error('storage unavailable');
+    return realGet(key);
+  };
+  await chromeStub._listeners.beforeNavigate({ tabId: 121, frameId: 0, url: OAUTH_CALLBACK });
+
+  assert.equal(fetchStub.calls.length, 0);
+  assert.deepEqual(chromeStub.tabs._state.updated,
+    [{ id: 121, changes: { url: 'about:blank' } }]);
+});
+
+await test('relay secrets never reach tab updates, logs, storage, or badges', async () => {
+  for (const fetchStub of [
+    relayFetch(jsonResponse(OAUTH_SUCCESS)),
+    relayFetch(null, { error: 'network private-code private-state' }),
+  ]) {
+    const { chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), { fetchStub });
+    const badgeCalls = [];
+    chromeStub.action.setBadgeText = (value) => badgeCalls.push(value);
+    const beforeStorage = {
+      local: await chromeStub.storage.local.get(null),
+      session: await chromeStub.storage.session.get(null),
+    };
+    const captured = await captureConsole(() => chromeStub._listeners.beforeNavigate({
+      tabId: 130, frameId: 0, url: OAUTH_CALLBACK,
+    }));
+    const afterStorage = {
+      local: await chromeStub.storage.local.get(null),
+      session: await chromeStub.storage.session.get(null),
+    };
+    const serialized = JSON.stringify({
+      logs: captured.lines,
+      storage: afterStorage,
+      destinations: chromeStub.tabs._state.updated,
+      badges: badgeCalls,
+    });
+    assert.deepEqual(afterStorage, beforeStorage);
+    assert.ok(!serialized.includes('private-code'));
+    assert.ok(!serialized.includes('private-state'));
+    assert.deepEqual(badgeCalls, []);
+    assert.equal(chromeStub.tabs._state.updated.length, 1);
+  }
 });
 
 await test('remote configuration updates one dynamic registration without duplicates', async () => {
@@ -4165,16 +4641,22 @@ await test('matching builds are stated quietly and a silent worker is stated lou
 // keeps running the CACHED old worker script. The worker sees that from the
 // inside, because WORKER_BUILD travels with its source.
 
-// Captures console.error/console.warn for the duration of `run`.
+// Captures every console channel for the duration of `run`.
 async function captureConsole(run) {
   const lines = [];
+  const realLog = console.log;
+  const realInfo = console.info;
   const realError = console.error;
   const realWarn = console.warn;
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  console.info = (...args) => { lines.push(args.join(' ')); };
   console.error = (...args) => { lines.push(args.join(' ')); };
   console.warn = (...args) => { lines.push(args.join(' ')); };
   try {
     return { value: await run(), lines };
   } finally {
+    console.log = realLog;
+    console.info = realInfo;
     console.error = realError;
     console.warn = realWarn;
   }
