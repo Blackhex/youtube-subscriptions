@@ -26,7 +26,7 @@ description: "YouTube API integration for YouTube Subscriptions Organizer. Use w
 - Token cached in `token.json`, auto-refresh on expiry
 - If refresh fails, delete token and re-run OAuth flow
 - Desktop-client redirect remains exactly `http://localhost:8085/`
-- Same-machine callbacks use a loopback-only listener; remote-browser callbacks are relayed by extension 2.5 to `POST /api/auth/oauth/callback/`
+- Callbacks use a loopback-only listener or extension 2.6 relay to `POST /api/auth/oauth/callback/` at an explicitly configured remote HTTPS or HTTP loopback app origin (exact `localhost` or `127.0.0.1`, any port)
 - The callback URL, decoded parameters and OAuth state are strictly bounded and validated against the original in-memory Flow
 - Callback exchange, refresh and logout use generation checks; token persistence is atomic and logout holds the lock through token deletion
 - Pending Flow state is process-local, so start and completion must reach one Django process
@@ -108,12 +108,12 @@ A companion Chrome extension (`extension/` directory) provides these cookies.
 - `background.js`: reads YouTube cookies via `chrome.cookies.getAll()`, converts to Playwright format
 - `content.js`: dynamically registered bridge for the exact configured app origin
 
-### Remote OAuth Callback Relay
+### OAuth Callback Relay
 1. Google redirects the Desktop client to `http://localhost:8085/`
-2. For a remote HTTPS app origin, `webNavigation.onBeforeNavigate` accepts only the exact top-level callback shape
+2. For an explicitly saved remote HTTPS or HTTP loopback app origin, `webNavigation.onBeforeNavigate` accepts only the exact top-level callback shape; unsaved defaults bypass relaying
 3. The worker scrubs the callback tab (or closes it) before transmitting callback data
 4. It re-checks configured origin and Chrome host permission, then POSTs only to `{origin}/api/auth/oauth/callback/` with redirects disabled and bounded I/O
-5. Only an authenticated, terminal, error-free backend response is success; local app origins bypass the relay
+5. Only an authenticated, terminal, error-free backend response is success; concurrent listener/relay callbacks use the backend's single-use and idempotent completion safeguards
 
 Never log, store, badge, or place the callback URL, code, state, or query in a destination URL. If tab scrubbing and closing both fail, abort the relay.
 

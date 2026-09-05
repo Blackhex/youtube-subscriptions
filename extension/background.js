@@ -32,7 +32,7 @@ importScripts('pockettube-live.js');
 // travels with the worker source can. On startup the worker compares the two
 // and reloads itself once (see maybeHealStaleWorker); the popup shows both and
 // shouts when they disagree.
-const WORKER_BUILD = '2.5';
+const WORKER_BUILD = '2.6';
 
 // A content script's sender origin is set by the browser and cannot be forged
 // by the page, so it — not the page-supplied appOrigin — decides who may read
@@ -456,7 +456,8 @@ function validateAndNormaliseOrigin(value) {
       throw new Error('IPv6 app origins are not supported.');
     }
     const loopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-    if (parsed.protocol === 'http:' && !loopback) {
+    if (parsed.protocol === 'http:' && (!loopback ||
+      !/^http:\/\/(localhost|127\.0\.0\.1)(?::\d+)?(?:[/?#]|$)/i.test(trimmed))) {
       throw new Error('Remote app origins must use HTTPS.');
     }
     return parsed.origin;
@@ -603,10 +604,11 @@ function parseOAuthCallback(value) {
   return value;
 }
 
-function isRemoteHttpsOrigin(origin) {
+function isOAuthRelayOrigin(origin) {
+  if (!origin) return false;
   const parsed = new URL(origin);
-  return parsed.protocol === 'https:' &&
-    parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1';
+  return isRequiredAppOrigin(origin) || (parsed.protocol === 'https:' &&
+    parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1');
 }
 
 function isTerminalOAuthRelayResponse(status, data) {
@@ -625,16 +627,18 @@ function isTerminalOAuthRelayResponse(status, data) {
     typeof data.error === 'string' && data.error.length > 0 && data.error.length <= 1024;
 }
 
-async function configuredAppOrigin() {
+async function configuredAppOrigin(requireExplicit = false) {
   const stored = await chrome.storage.local.get('appOrigin');
+  if (requireExplicit && !stored.appOrigin) return null;
   return validateAndNormaliseOrigin(stored.appOrigin || DEFAULT_APP_ORIGIN);
 }
 
-async function currentRemoteRelayOrigin(expectedOrigin) {
-  const current = await configuredAppOrigin();
-  if (current !== expectedOrigin || !isRemoteHttpsOrigin(current)) return null;
+async function currentOAuthRelayOrigin(expectedOrigin) {
+  const current = await configuredAppOrigin(true);
+  if (current !== expectedOrigin || !isOAuthRelayOrigin(current)) return null;
 
-  return (await hasOriginAccess(current)) ? current : null;
+  if (!(await hasOriginAccess(current))) return null;
+  return (await configuredAppOrigin(true)) === current ? current : null;
 }
 
 async function scrubOAuthCallbackTab(tabId) {
@@ -661,11 +665,11 @@ async function scrubOAuthCallbackTab(tabId) {
 async function relayOAuthCallback(details, callbackUrl) {
   let expectedOrigin;
   try {
-    expectedOrigin = await configuredAppOrigin();
+    expectedOrigin = await configuredAppOrigin(true);
   } catch (error) {
     return;
   }
-  if (!isRemoteHttpsOrigin(expectedOrigin)) return;
+  if (!isOAuthRelayOrigin(expectedOrigin)) return;
 
   if (!(await scrubOAuthCallbackTab(details.tabId))) return;
 
@@ -674,7 +678,7 @@ async function relayOAuthCallback(details, callbackUrl) {
   try {
     let origin;
     try {
-      origin = await currentRemoteRelayOrigin(expectedOrigin);
+      origin = await currentOAuthRelayOrigin(expectedOrigin);
     } catch (error) {
       return;
     }

@@ -99,7 +99,7 @@ A Gemini API key is optional and is used only for AI category suggestions.
 
 8. Open <http://127.0.0.1:8001>. Start a sync in the application and complete the Google OAuth flow when prompted.
 
-The OAuth callback uses `http://localhost:8085/`. Keep port `8085` available while signing in.
+The OAuth callback uses `http://localhost:8085/`. Keep port `8085` available in the backend's environment while signing in. For a Home Assistant add-on or container reached through a local app port, the companion extension can relay the callback without exposing container port `8085`; see the [extension setup and reload guide](extension/README.md).
 
 ## Optional Integrations
 
@@ -118,6 +118,8 @@ The unpacked extension in `extension/` provides features that OAuth alone cannot
 5. Stay signed in to YouTube in the same Chrome profile.
 
 The extension can access YouTube cookies and may request access to a configured application origin. Review [extension/manifest.json](extension/manifest.json) before installing it.
+
+Build **2.6** supports OAuth relay to explicitly saved HTTP `localhost` or `127.0.0.1` origins (including `http://127.0.0.1:8098`) as well as remote HTTPS origins. Non-loopback HTTP hosts are rejected. Follow the [extension setup and reload guide](extension/README.md) to update Chrome's service worker and verify both build markers.
 
 ### Playwright Browser
 

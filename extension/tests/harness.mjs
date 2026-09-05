@@ -1855,9 +1855,9 @@ async function remoteRelay(response, options = {}) {
   return { bg, chromeStub, fetchStub, origin, permission };
 }
 
-await test('manifest and worker are 2.5 with the minimal navigation permission', async () => {
+await test('manifest and worker are 2.6 with the minimal navigation permission', async () => {
   const { bg, chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS));
-  assert.equal(MANIFEST.version, '2.5');
+  assert.equal(MANIFEST.version, '2.6');
   assert.equal(bg.WORKER_BUILD, MANIFEST.version);
   assert.equal(MANIFEST.permissions.filter((permission) => permission === 'webNavigation').length, 1);
   assert.equal(typeof chromeStub._listeners.beforeNavigate, 'function',
@@ -1976,15 +1976,123 @@ await test('failed update and removal abort callback relay without exposing secr
   assert.ok(!observable.includes('private-state'));
 });
 
-await test('local configured origins leave OAuth callbacks to the backend listener', async () => {
-  for (const origin of ['http://localhost:8001', 'http://127.0.0.1:8001']) {
+await test('explicit HTTP loopback origins relay OAuth callbacks to the configured app', async () => {
+  for (const origin of [
+    'http://localhost:8098', 'http://127.0.0.1:8098',
+    'http://localhost', 'http://127.0.0.1:8001',
+  ]) {
     const chromeStub = makeChrome();
     await chromeStub.storage.local.set({ appOrigin: origin });
     const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
     loadBackground(chromeStub, fetchStub);
     await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
-    assert.equal(fetchStub.calls.length, 0);
-    assert.deepEqual(chromeStub.tabs._state.updated, []);
+    assert.equal(fetchStub.calls.length, 1, origin);
+    assert.equal(fetchStub.calls[0].url, `${origin}/api/auth/oauth/callback/`);
+    assert.equal(fetchStub.calls[0].init.method, 'POST');
+    assert.equal(fetchStub.calls[0].init.redirect, 'error');
+    assert.deepEqual(JSON.parse(fetchStub.calls[0].init.body), { callback_url: OAUTH_CALLBACK });
+    assert.deepEqual(chromeStub.tabs._state.updated,
+      [{ id: 43, changes: { url: `${origin}/` } }]);
+  }
+});
+
+await test('an unsaved default origin leaves callbacks to the direct listener', async () => {
+  const chromeStub = makeChrome();
+  const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
+  loadBackground(chromeStub, fetchStub);
+  await settle();
+  await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+  assert.equal(fetchStub.calls.length, 0);
+  assert.deepEqual(chromeStub.tabs._state.updated, []);
+});
+
+await test('HTTP LAN hosts, loopback lookalikes, and numeric aliases cannot receive callbacks', async () => {
+  const rejected = [
+    'http://192.168.1.20:8098', 'http://homeassistant.local:8098',
+    'http://example.com', 'http://localhost.example.com:8098',
+    'http://127.0.0.1.example.com:8098', 'http://localhost.:8098',
+    'http://127.0.0.2:8098', 'http://127.1:8098', 'http://2130706433:8098',
+    'http://0x7f000001:8098', 'http://[::1]:8098',
+    'http://localhost@evil.example:8098', 'http://evil.example@localhost:8098',
+  ];
+  for (const origin of rejected) {
+    const chromeStub = makeChrome();
+    const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS));
+    const bg = loadBackground(chromeStub, fetchStub);
+    await settle();
+    assert.throws(() => bg.validateAndNormaliseOrigin(origin), undefined, origin);
+    await chromeStub.storage.local.set({ appOrigin: origin });
+    await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+    assert.equal(fetchStub.calls.length, 0, origin);
+  }
+});
+
+await test('loopback relay rejects missing permissions and configuration changes before forwarding', async () => {
+  for (const origin of ['http://127.0.0.1:8098', 'http://localhost:8098']) {
+    for (const mode of ['missing-permission', 'origin', 'port', 'removed', 'during-permission']) {
+      const { chromeStub, fetchStub, permission } = await remoteRelay(
+        jsonResponse(OAUTH_SUCCESS), { origin }
+      );
+      const contains = chromeStub.permissions.contains;
+      const checkedPermissions = [];
+      chromeStub.permissions.contains = async (request) => {
+        checkedPermissions.push(request);
+        if (mode === 'missing-permission') return false;
+        if (mode === 'during-permission') {
+          await chromeStub.storage.local.set({ appOrigin: origin.replace(':8098', ':8099') });
+        }
+        return contains(request);
+      };
+      const update = chromeStub.tabs.update;
+      chromeStub.tabs.update = async (...args) => {
+        const result = await update(...args);
+        if (mode === 'origin') {
+          await chromeStub.storage.local.set({ appOrigin: 'https://other.example' });
+        } else if (mode === 'port') {
+          await chromeStub.storage.local.set({ appOrigin: origin.replace(':8098', ':8099') });
+        } else if (mode === 'removed') {
+          await chromeStub.storage.local.remove('appOrigin');
+        }
+        return result;
+      };
+      await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+      assert.equal(fetchStub.calls.length, 0, `${origin}: ${mode}`);
+      assert.deepEqual(chromeStub.tabs._state.updated,
+        [{ id: 43, changes: { url: `${origin}/` } }]);
+      if (mode === 'missing-permission' || mode === 'during-permission') {
+        assert.deepEqual(checkedPermissions, [{ origins: [permission] }]);
+      }
+    }
+  }
+});
+
+await test('loopback relay ignores invalid callbacks and subframes and deduplicates pending events', async () => {
+  const origin = 'http://127.0.0.1:8098';
+  const fetchStub = relayFetch(jsonResponse(OAUTH_SUCCESS), { pending: true });
+  const { chromeStub } = await remoteRelay(null, { origin, fetchStub });
+  for (const url of [
+    'http://localhost:8085/?state=s&code=c&code=d',
+    'http://localhost:8085/?state=s&code=c&error=access_denied',
+    'http://localhost:8085/?code=c',
+    'http://localhost:8085/?state=s&code=c#fragment',
+    'http://localhost.evil.example:8085/?state=s&code=c',
+    'http://127.0.0.1:8085/?state=s&code=c',
+    'http://localhost:8098/?state=s&code=c',
+  ]) {
+    await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url });
+  }
+  await chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 1, url: OAUTH_CALLBACK });
+  assert.equal(fetchStub.calls.length, 0);
+  const first = chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+  const duplicate = chromeStub._listeners.beforeNavigate({ tabId: 43, frameId: 0, url: OAUTH_CALLBACK });
+  await settle();
+  try {
+    assert.equal(duplicate, undefined);
+    assert.equal(fetchStub.calls.length, 1);
+    assert.equal(chromeStub.tabs._state.updated.length, 1);
+  } finally {
+    fetchStub.release();
+    await first;
   }
 });
 
@@ -2178,11 +2286,14 @@ await test('an unavailable configured origin uses the deterministic scrub fallba
 });
 
 await test('relay secrets never reach tab updates, logs, storage, or badges', async () => {
-  for (const fetchStub of [
-    relayFetch(jsonResponse(OAUTH_SUCCESS)),
-    relayFetch(null, { error: 'network private-code private-state' }),
-  ]) {
-    const { chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), { fetchStub });
+  const cases = [
+    'https://app.home.example:8443', 'http://127.0.0.1:8098', 'http://localhost:8098',
+  ].flatMap((origin) => [
+    { origin, fetchStub: relayFetch(jsonResponse(OAUTH_SUCCESS)) },
+    { origin, fetchStub: relayFetch(null, { error: 'network private-code private-state' }) },
+  ]);
+  for (const options of cases) {
+    const { chromeStub } = await remoteRelay(jsonResponse(OAUTH_SUCCESS), options);
     const badgeCalls = [];
     chromeStub.action.setBadgeText = (value) => badgeCalls.push(value);
     const beforeStorage = {

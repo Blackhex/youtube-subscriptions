@@ -289,7 +289,7 @@ Bind localhost:8085 listener → generate and publish auth URL
        ↓
 Google consent → http://localhost:8085/?state=...&code=...
        ├─ same machine → loopback listener
-       └─ remote browser → extension relay → /api/auth/oauth/callback/
+    └─ configured app → extension relay → /api/auth/oauth/callback/
                           ↓
                 validate state → atomic token save → sync
 ```
@@ -300,7 +300,7 @@ Google consent → http://localhost:8085/?state=...&code=...
 - Google's redirect remains exactly `http://localhost:8085/`, as required by the installed-app client
 - A custom `http.server.HTTPServer` bound to `localhost:8085` handles same-machine callbacks
 - `OAUTHLIB_INSECURE_TRANSPORT=1` is set to allow `http://localhost` callback
-- For a remote browser, extension 2.5 observes only a top-level exact loopback callback, removes the callback URL from the tab, and posts it to the configured HTTPS app origin
+- Extension 2.6 observes only a top-level exact loopback callback, removes the callback URL from the tab, and posts it to an explicitly configured remote HTTPS or HTTP loopback app origin (`localhost` or `127.0.0.1`, including custom ports). An unsaved default origin leaves the callback to the listener.
 - `POST /api/auth/oauth/callback/` validates the URL, query shape, OAuth state and active in-memory Flow before exchanging the code
 - Callback exchange, credential refresh and logout share a generation lock; credentials are written atomically and logout cannot be undone by an in-flight callback or refresh
 - Frontend polls `GET /api/auth/oauth/` every 2s to detect completion
@@ -308,7 +308,9 @@ Google consent → http://localhost:8085/?state=...&code=...
 
 **Operational constraints:**
 - An in-progress Flow is process-local. OAuth must run through one Django process; a restart or another worker invalidates the pending callback.
-- Remote relay requires the companion extension, a configured exact HTTPS app origin, Chrome host permission for that origin and network reachability from the browser machine.
+- Relay requires the companion extension, an explicitly configured supported app origin, Chrome host permission for that origin and network reachability from the browser machine. The exact origin (including port) is rechecked before forwarding.
+- For a Home Assistant add-on at `http://127.0.0.1:8098`, port 8085 only needs to bind inside the container; it does not need to be exposed on the host. HTTP LAN hosts, hostname lookalikes and numeric loopback aliases are rejected. See the [extension setup and reload guide](../extension/README.md).
+- A direct listener can race with the relay. Concurrent callbacks cannot exchange the token twice, and a duplicate after success returns the completed state without corrupting it.
 - This OAuth grant belongs to the server's shared YouTube integration. It does not identify or authenticate browser/API callers and therefore is not a replacement for application authentication.
 
 **API endpoints:**

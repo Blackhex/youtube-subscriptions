@@ -53,14 +53,14 @@ Start Google OAuth flow. Backend starts a callback listener on port 8085 and ret
 2. A loopback-only `HTTPServer` binds and enters its context on port 8085. Bind failure terminates the flow without exposing an auth URL.
 3. Backend calls `InstalledAppFlow.authorization_url()` and publishes the URL, Flow and expected state while the listener is active.
 4. Frontend opens `auth_url` in a new tab → user signs in → Google redirects to `localhost:8085`.
-5. On the backend machine, the listener completes the callback directly. On a different browser machine, extension 2.5 relays the exact callback to `POST /api/auth/oauth/callback/` at the configured HTTPS app origin.
+5. The listener can complete the callback directly when reachable. With an explicitly configured app origin, extension 2.6 relays the exact callback to `POST /api/auth/oauth/callback/` at a remote HTTPS or HTTP loopback origin (`localhost` or `127.0.0.1`, any port). This includes an add-on reachable at `http://127.0.0.1:8098` without publishing container port 8085.
 6. Backend validates OAuth state, exchanges the code, and atomically saves `token.json`.
 7. Frontend polls `GET /api/auth/oauth/` until `authenticated=true`.
 
 An in-progress OAuth Flow is process-local. Start and completion must reach the same Django process, and a server restart invalidates the pending flow.
 
 ### `POST /api/auth/oauth/callback/`
-Complete the active installed-app OAuth flow from the companion extension on a remote browser machine.
+Complete the active installed-app OAuth flow from the companion extension, including when the backend listener is isolated inside a container. See the [supported origins and Chrome reload steps](../extension/README.md).
 
 **View:** `OAuthCallbackView(APIView)`
 
@@ -96,6 +96,8 @@ The callback must use the exact loopback origin, port and path, contain one `sta
 ```
 
 HTTP 200 requires an authenticated, terminal and error-free result. An older token never converts a rejected callback into success.
+
+A concurrent callback during token exchange returns a nonterminal error without changing the active exchange. Replaying the same state after success returns the existing successful result. These safeguards apply equally to the direct listener and extension relay.
 
 ### `DELETE /api/auth/oauth/`
 Atomically cancel any pending OAuth flow and delete the OAuth token. Callback exchange and token refresh use the same generation lock, so an in-flight operation cannot recreate the token after logout.
