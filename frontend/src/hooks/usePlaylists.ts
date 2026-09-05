@@ -9,6 +9,7 @@ interface PlaylistItemsState {
   hasMore: boolean;
   loading: boolean;
   nextPageToken?: string;
+  error?: string;
 }
 
 export function usePlaylists() {
@@ -35,6 +36,7 @@ export function usePlaylists() {
       [playlistId]: {
         ...(prev[playlistId] ?? { items: [], page: 1, hasMore: true, loading: false }),
         loading: true,
+        error: undefined,
       },
     }));
     try {
@@ -64,6 +66,9 @@ export function usePlaylists() {
         [playlistId]: {
           ...(prev[playlistId] ?? { items: [], page: 1, hasMore: false, loading: false }),
           loading: false,
+          error: playlistId === 'WL'
+            ? 'Watch Later is unavailable. YouTube may not allow access with this account.'
+            : 'Failed to load playlist items.',
         },
       }));
       dispatch({ type: 'SHOW_TOAST', message: 'Failed to load playlist items', toastType: 'error' });
@@ -92,7 +97,8 @@ export function usePlaylists() {
       });
       // Update playlist item count
       setPlaylists((prev) =>
-        prev.map((p) => p.id === playlistId ? { ...p, item_count: Math.max(0, p.item_count - 1) } : p),
+        prev.map((p) => p.id === playlistId && p.item_count !== null
+          ? { ...p, item_count: Math.max(0, p.item_count - 1) } : p),
       );
     } catch {
       dispatch({ type: 'SHOW_TOAST', message: 'Failed to remove item', toastType: 'error' });

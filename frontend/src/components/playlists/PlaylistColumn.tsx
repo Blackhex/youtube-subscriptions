@@ -15,7 +15,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { Cast, Delete } from '@mui/icons-material';
+import { Cast, Delete, Refresh } from '@mui/icons-material';
 import type { Playlist, Video } from '../../types';
 import VideoItem from '../feeds/VideoItem';
 import { useInfiniteScroll } from '../../hooks/useInfiniteScroll';
@@ -25,6 +25,8 @@ interface PlaylistColumnProps {
   items: Video[];
   hasMore: boolean;
   loading: boolean;
+  error?: string;
+  onRetry?: () => void;
   onLoadMore: () => void;
   onRemoveItem: (playlistId: string, itemId: string) => void;
   onReorder: (playlistId: string, itemIds: string[], videoIds: string[], reorderedItems: Video[]) => void;
@@ -75,6 +77,8 @@ export default function PlaylistColumn({
   items,
   hasMore,
   loading,
+  error,
+  onRetry,
   onLoadMore,
   onRemoveItem,
   onReorder,
@@ -88,9 +92,10 @@ export default function PlaylistColumn({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const sentinelRef = useInfiniteScroll(onLoadMore, hasMore, loading);
+  const sentinelRef = useInfiniteScroll(onLoadMore, hasMore && !error, loading);
 
   const handleDragEnd = useCallback((event: DragEndEvent) => {
+    if (playlist.read_only) return;
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const oldIndex = items.findIndex(
@@ -109,7 +114,7 @@ export default function PlaylistColumn({
       reordered.map((v) => v.video_id),
       reordered,
     );
-  }, [items, onReorder, playlist.id]);
+  }, [items, onReorder, playlist.id, playlist.read_only]);
 
   const handleDelete = useCallback(async () => {
     const ok = await confirm({
@@ -140,24 +145,33 @@ export default function PlaylistColumn({
               <Cast style={{ fontSize: '1rem' }} />
             </button>
           )}
-          <button
+          {!playlist.read_only && <button
             className="btn-action btn-action-danger"
             title="Delete playlist"
             onClick={handleDelete}
           >
             <Delete style={{ fontSize: '1rem' }} />
-          </button>
+          </button>}
         </div>
       </div>
       <div className="filter-tags">
-        <span className="filter-tag">{playlist.item_count} items</span>
+        {playlist.item_count !== null ? (
+          <span className="filter-tag">{playlist.item_count} items</span>
+        ) : !loading && !error && (
+          <span className="filter-tag">{items.length}{hasMore ? '+' : ''} items</span>
+        )}
         <span className="filter-tag">{playlist.privacy_status}</span>
+        {playlist.read_only && <span className="filter-tag">Read-only</span>}
       </div>
       <div className="column-body">
-        {items.length === 0 && !loading ? (
+        {items.length === 0 && !loading && !error ? (
           <div className="empty-state">
             <p>No items</p>
           </div>
+        ) : playlist.read_only ? (
+          items.map((video) => (
+            <VideoItem key={video.playlist_item_id ?? video.video_id} video={video} />
+          ))
         ) : (
           <DndContext
             sensors={sensors}
@@ -178,6 +192,14 @@ export default function PlaylistColumn({
           </DndContext>
         )}
         {loading && <div className="text-center p-2"><span className="spinner-border spinner-border-sm" /></div>}
+        {error && (
+          <div className="empty-state" role="alert">
+            <p>{error}</p>
+            <button className="btn-action" title="Retry loading playlist" onClick={onRetry} disabled={loading}>
+              <Refresh style={{ fontSize: '1rem' }} />
+            </button>
+          </div>
+        )}
         <div ref={sentinelRef} />
       </div>
     </div>

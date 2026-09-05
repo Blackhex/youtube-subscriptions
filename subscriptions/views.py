@@ -1259,8 +1259,9 @@ class PlaylistListView(APIView):
                 'title': snippet.get('title', ''),
                 'description': snippet.get('description', ''),
                 'thumbnail_url': thumb_url,
-                'item_count': int(p.get('contentDetails', {}).get('itemCount', 0)),
+                'item_count': None if p.get('id') == 'WL' else int(p.get('contentDetails', {}).get('itemCount', 0)),
                 'privacy_status': p.get('status', {}).get('privacyStatus', 'private'),
+                'read_only': p.get('id') == 'WL',
             })
 
         return Response(playlists)
@@ -1268,6 +1269,8 @@ class PlaylistListView(APIView):
 
 class PlaylistDetailView(APIView):
     def delete(self, request, playlist_id):
+        if playlist_id == 'WL':
+            return Response({'error': 'Watch Later is read-only.'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
         try:
             from .youtube_service import YouTubeService
             yt = YouTubeService()
@@ -1283,6 +1286,8 @@ class PlaylistItemsView(APIView):
         per_page = min(int(request.query_params.get('per_page', 20)), 50)
         page = int(request.query_params.get('page', 1))
         page_token = request.query_params.get('page_token')
+        if playlist_id == 'WL' and page_token and len(page_token) > 8192:
+            return Response({'error': 'Invalid Watch Later page token.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             from .youtube_service import YouTubeService
@@ -1318,9 +1323,13 @@ class PlaylistItemsView(APIView):
                 'channel_id': local.channel_id if local else snippet.get('videoOwnerChannelId', ''),
                 'title': local.title if local else snippet.get('title', ''),
                 'channel_title': local.channel.channel_title if local and local.channel else snippet.get('videoOwnerChannelTitle', ''),
-                'thumbnail_url': f'/api/videos/{video_id}/thumbnail/' if video_id else '',
+                'thumbnail_url': (
+                    snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
+                    if playlist_id == 'WL' and not local
+                    else f'/api/videos/{video_id}/thumbnail/' if video_id else ''
+                ),
                 'published_at': snippet.get('publishedAt', ''),
-                'duration_seconds': local.duration_seconds if local else None,
+                'duration_seconds': local.duration_seconds if local else item.get('duration_seconds'),
                 'video_type': local.video_type if local else None,
                 'playback_progress': local.playback_progress if local else None,
                 'playlist_item_id': item.get('id', ''),
@@ -1337,6 +1346,8 @@ class PlaylistItemsView(APIView):
         })
 
     def post(self, request, playlist_id):
+        if playlist_id == 'WL':
+            return Response({'error': 'Watch Later is read-only.'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
         video_id = request.data.get('video_id')
         if not video_id:
             return Response({'error': 'video_id required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1354,6 +1365,8 @@ class PlaylistItemsView(APIView):
 
 class PlaylistItemsReorderView(APIView):
     def post(self, request, playlist_id):
+        if playlist_id == 'WL':
+            return Response({'error': 'Watch Later is read-only.'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
         item_ids = request.data.get('item_ids', [])
         video_ids = request.data.get('video_ids', [])
 
@@ -1379,6 +1392,8 @@ class PlaylistItemsReorderView(APIView):
 
 class PlaylistItemDetailView(APIView):
     def delete(self, request, playlist_id, item_id):
+        if playlist_id == 'WL':
+            return Response({'error': 'Watch Later is read-only.'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
         try:
             from .youtube_service import YouTubeService
             yt = YouTubeService()

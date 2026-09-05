@@ -91,8 +91,9 @@ export interface Playlist {
   title: string;
   description: string;
   thumbnail_url: string | null;
-  item_count: number;
+  item_count: number | null;
   privacy_status: string;
+  read_only?: boolean;
 }
 
 export interface PaginatedResponse<T> {

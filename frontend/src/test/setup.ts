@@ -27,6 +27,7 @@ vi.mock('@mui/icons-material', () => {
     Delete: icon,
     OpenInNew: icon,
     Cast: icon,
+    Refresh: icon,
     Description: icon,
     Edit: icon,
     NoteAdd: icon,

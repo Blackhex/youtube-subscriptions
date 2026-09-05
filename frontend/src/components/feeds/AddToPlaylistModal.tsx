@@ -17,9 +17,10 @@ export default function AddToPlaylistModal({ video, onClose }: AddToPlaylistModa
 
   useEffect(() => {
     api.fetchPlaylists().then((res) => {
-      setPlaylists(res.data);
-      if (res.data.length > 0) {
-        setSelectedId(res.data[0].id);
+      const writable = res.data.filter((playlist) => !playlist.read_only);
+      setPlaylists(writable);
+      if (writable.length > 0) {
+        setSelectedId(writable[0].id);
       }
     }).catch(() => {
       dispatch({ type: 'SHOW_TOAST', message: 'Failed to load playlists', toastType: 'error' });

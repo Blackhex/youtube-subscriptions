@@ -13,6 +13,7 @@ The application combines a Django REST API with a React and TypeScript frontend.
 - Organize subscriptions in hierarchical categories
 - Create reorderable feeds with category and video filters
 - Browse and update YouTube playlists
+- Browse Watch Later on demand as the first playlist through Python InnerTube, without the extension
 - Maintain a reorderable playback queue
 - Send queued videos to Google Cast devices
 - Import and export PocketTube-compatible categories
@@ -102,6 +103,14 @@ A Gemini API key is optional and is used only for AI category suggestions.
 The OAuth callback uses `http://localhost:8085/`. Keep port `8085` available in the backend's environment while signing in. For a Home Assistant add-on or container reached through a local app port, the companion extension can relay the callback without exposing container port `8085`; see the [extension setup and reload guide](extension/README.md).
 
 ## Optional Integrations
+
+### Watch Later
+
+Watch Later appears first in **Playlists**. Its videos are fetched on demand through the Python InnerTube client using the existing Google OAuth token; no companion extension or cookie import is required by this implementation. Further pages load as you scroll, and videos not in the local database still show their thumbnails and available duration.
+
+This integration is read-only: you can browse, open videos on YouTube, and cast the playlist, but adding, removing, reordering, or deleting Watch Later is not supported. Other playlists retain their editing controls. The item count is unknown until pages load; a `+` indicates that more items are available.
+
+InnerTube is unofficial, and Watch Later access with the OAuth TV client is not guaranteed for every account. If YouTube rejects access or changes the response format, the column shows an error with a retry button instead of an empty list. Automated coverage uses synthetic responses; live account compatibility must be verified in the deployed app.
 
 ### Gemini Suggestions
 

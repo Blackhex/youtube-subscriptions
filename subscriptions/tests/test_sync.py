@@ -1,10 +1,13 @@
+import json
 from datetime import timedelta
 from unittest.mock import patch, MagicMock
 
 from django.test import TestCase
 from django.utils import timezone
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
-from subscriptions.models import Category, Feed, Subscription, SubscriptionCategory, Video
+from subscriptions.models import Category, Feed, QueueItem, Subscription, SubscriptionCategory, Video
 from subscriptions.sync import (
     _fetch_channel_videos,
     _get_channels_to_sync,
@@ -280,6 +283,139 @@ class FetchChannelVideosTest(SyncStateSnapshotMixin, TestCase):
         self.assertEqual(outcome, 'no_uploads')
         self.sub.refresh_from_db()
         self.assertIsNotNone(self.sub.videos_synced_at)
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_missing_uploads_playlist_preserves_data_and_throttles_next_attempt(self, mock_service):
+        service = mock_service.from_credentials.return_value
+        service.fetch_channel_details.return_value = {
+            'UC_fetch': {'uploads_playlist_id': 'UU_fetch'},
+        }
+        service.fetch_uploads.side_effect = HttpError(
+            Response({'status': 404}),
+            json.dumps({'error': {'message': 'Not found', 'errors': [
+                {'reason': 'playlistNotFound'},
+            ]}}).encode(),
+        )
+        video = Video.objects.create(
+            video_id='existing', channel=self.sub, title='Existing video',
+            published_at=timezone.now(),
+        )
+        queue_item = QueueItem.objects.create(video=video, sort_order=0)
+        attempted_at = timezone.now()
+
+        with patch('subscriptions.sync.timezone.now', return_value=attempted_at):
+            with self.assertLogs('subscriptions.sync', level='WARNING') as logs:
+                result = _fetch_channel_videos(MagicMock(), 'UC_fetch', False)
+
+        self.assertEqual(result, (0, 'no_uploads'))
+        self.assertEqual(len(logs.records), 1)
+        self.assertIsNone(logs.records[0].exc_info)
+        self.assertIn('Uploads playlist unavailable', logs.output[0])
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.videos_synced_at, attempted_at)
+        video.refresh_from_db()
+        self.assertEqual(video.title, 'Existing video')
+        self.assertTrue(QueueItem.objects.filter(pk=queue_item.pk).exists())
+        service.fetch_video_details.assert_not_called()
+        self.assertEqual(_fetch_channel_videos(MagicMock(), 'UC_fetch', False), (0, 'skipped'))
+        service.fetch_uploads.assert_called_once()
+        service.fetch_channel_details.assert_called_once()
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_missing_uploads_playlist_counts_as_processed_without_error(self, mock_service):
+        service = mock_service.from_credentials.return_value
+        service.fetch_channel_details.return_value = {
+            'UC_fetch': {'uploads_playlist_id': 'UU_fetch'},
+        }
+        service.fetch_uploads.side_effect = HttpError(
+            Response({'status': 404}),
+            b'{"error":{"message":"Not found","errors":[{"reason":"playlistNotFound"}]}}',
+        )
+        before = get_sync_state()
+
+        with self.assertLogs('subscriptions.sync', level='WARNING'):
+            self.assertEqual(_sync_single_channel(MagicMock(), 'UC_fetch', False), 0)
+
+        after = get_sync_state()
+        self.assertEqual(after['processed'], before['processed'] + 1)
+        for counter in ('errors', 'skipped', 'fetched_new'):
+            self.assertEqual(after[counter], before[counter])
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_on_demand_missing_playlist_does_not_change_background_state(self, mock_service):
+        service = mock_service.from_credentials.return_value
+        service.fetch_channel_details.return_value = {
+            'UC_fetch': {'uploads_playlist_id': 'UU_fetch'},
+        }
+        service.fetch_uploads.side_effect = HttpError(
+            Response({'status': 404}),
+            b'{"error":{"message":"Not found","errors":[{"reason":"playlistNotFound"}]}}',
+        )
+        before = get_sync_state()
+
+        with self.assertLogs('subscriptions.sync', level='WARNING'):
+            self.assertEqual(sync_channel_videos_now('UC_fetch'), 0)
+
+        self.assertEqual(get_sync_state(), before)
+        self.sub.refresh_from_db()
+        self.assertIsNotNone(self.sub.videos_synced_at)
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_missing_playlist_can_recover_after_cooldown_or_on_forced_sync(self, mock_service):
+        service = mock_service.from_credentials.return_value
+        service.fetch_channel_details.return_value = {
+            'UC_fetch': {'uploads_playlist_id': 'UU_fetch'},
+        }
+        for force in (False, True):
+            with self.subTest(force=force):
+                self.sub.videos_synced_at = None
+                self.sub.save(update_fields=['videos_synced_at'])
+                service.fetch_uploads.side_effect = HttpError(
+                    Response({'status': 404}),
+                    b'{"error":{"message":"Not found","errors":[{"reason":"playlistNotFound"}]}}',
+                )
+                with self.assertLogs('subscriptions.sync', level='WARNING'):
+                    self.assertEqual(
+                        _fetch_channel_videos(MagicMock(), 'UC_fetch', False), (0, 'no_uploads')
+                    )
+                self.sub.refresh_from_db()
+                if not force:
+                    self.sub.videos_synced_at -= timedelta(minutes=16)
+                    self.sub.save(update_fields=['videos_synced_at'])
+                service.fetch_uploads.side_effect = None
+                service.fetch_uploads.return_value = []
+
+                self.assertEqual(
+                    _fetch_channel_videos(MagicMock(), 'UC_fetch', force), (0, 'synced')
+                )
+
+    @patch('subscriptions.sync.YouTubeService')
+    def test_unrelated_upload_errors_propagate_without_stamping_attempt(self, mock_service):
+        service = mock_service.from_credentials.return_value
+        service.fetch_channel_details.return_value = {
+            'UC_fetch': {'uploads_playlist_id': 'UU_fetch'},
+        }
+        cases = [
+            (404, {'errors': [{'reason': 'notFound'}]}),
+            (403, {'errors': [{'reason': 'quotaExceeded'}]}),
+            (401, {'errors': [{'reason': 'authError'}]}),
+            (500, {'errors': [{'reason': 'backendError'}]}),
+            (403, {'errors': [{'reason': 'playlistNotFound'}]}),
+            (404, {'message': 'playlistNotFound'}),
+            (404, {'errors': ['playlistNotFound']}),
+        ]
+        for status, details in cases:
+            with self.subTest(status=status, details=details):
+                error = HttpError(
+                    Response({'status': status}),
+                    json.dumps({'error': {'message': 'API failure', **details}}).encode(),
+                )
+                service.fetch_uploads.side_effect = error
+                with self.assertRaises(HttpError) as caught:
+                    _fetch_channel_videos(MagicMock(), 'UC_fetch', False)
+                self.assertIs(caught.exception, error)
+                self.sub.refresh_from_db()
+                self.assertIsNone(self.sub.videos_synced_at)
 
     @patch('subscriptions.sync.YouTubeService')
     def test_synced_outcome_creates_videos_and_stamps_subscription(self, mock_service):

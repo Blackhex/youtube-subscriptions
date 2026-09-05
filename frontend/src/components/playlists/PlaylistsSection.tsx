@@ -59,6 +59,9 @@ export default function PlaylistsSection({ confirm }: PlaylistsSectionProps) {
               items={state?.items ?? []}
               hasMore={state?.hasMore ?? true}
               loading={state?.loading ?? false}
+              error={state?.error}
+              onRetry={() => fetchPlaylistItems(playlist.id,
+                state?.items.length ? state.nextPageToken : undefined)}
               onLoadMore={() => loadMoreItems(playlist.id)}
               onRemoveItem={removeItem}
               onReorder={reorderItems}

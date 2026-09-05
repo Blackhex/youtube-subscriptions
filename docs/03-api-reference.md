@@ -631,10 +631,18 @@ Refresh queue playback progress. Queries Lounge nowPlaying or YouTube watch hist
 ### `GET /api/playlists/`
 Get all playlists owned by the authenticated user (fetched live from YouTube).
 
+The response prepends a synthetic `WL` entry titled `Watch Later`, with `privacy_status: "private"`, `read_only: true`, and `item_count: null` (unknown). Listing playlists does not fetch Watch Later contents. Ordinary playlists have `read_only: false` and a numeric item count.
+
 ### `GET /api/playlists/<playlist_id>/items/`
 Get paginated items for a playlist (fetched live, enriched with local video data).
 
-**Query Parameters:** `page`, `per_page`
+**Query Parameters:** `page`, `per_page`, `page_token`
+
+For `WL`, the Python InnerTube client uses the existing OAuth bearer token with the TVHTML5 context and `browseId: "VLWL"`. Subsequent requests submit the opaque `next_page_token` as `page_token`. InnerTube determines its native page size, so `per_page` is not a cap for `WL`; no items in a returned page are discarded. Watch Later contents are fetched live, not synchronized into the local database. Thumbnails and duration from InnerTube are used for videos absent from the local cache.
+
+An unavailable or unrecognized InnerTube response returns HTTP 502 with a sanitized error, not a successful empty playlist. The integration is unofficial and account-dependent; it does not require the extension or automatically fall back to browser cookies. Network requests time out after 30 seconds and reject redirects.
+
+All item-mutation endpoints and playlist deletion return HTTP 405 for `WL`. Watch Later is excluded from the frontend's add-to-playlist choices. Read and Cast endpoints remain available; casting follows continuation pages to assemble the video IDs.
 
 ### `POST /api/playlists/<playlist_id>/items/`
 Add videos to a playlist.

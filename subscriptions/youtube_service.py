@@ -403,6 +403,138 @@ class YouTubeInnerTubeAPI:
 
     # ── InnerTube API Methods ────────────────────────────────────────────
 
+    def fetch_watch_later(self, page_token=None) -> tuple[list[dict], str | None]:
+        body = {'context': self._INNERTUBE_CONTEXT}
+        if page_token:
+            body['continuation'] = page_token
+        else:
+            body['browseId'] = 'VLWL'
+        try:
+            response = http_requests.post(
+                self._INNERTUBE_URL, json=body, headers=self._innertube_headers(),
+                timeout=30, allow_redirects=False,
+            )
+            response.raise_for_status()
+            if 300 <= response.status_code < 400:
+                raise ValueError('Unexpected redirect')
+            items, next_token = self._parse_watch_later(response.json())
+            if page_token and next_token == page_token:
+                raise ValueError('Repeated continuation')
+            return items, next_token
+        except (http_requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+            raise RuntimeError(
+                'Watch Later is unavailable through YouTube InnerTube. '
+                'The signed-in account may not have access, or YouTube changed its response.'
+            ) from None
+
+    @staticmethod
+    def _parse_watch_later(data) -> tuple[list[dict], str | None]:
+        if not isinstance(data, dict) or data.get('error'):
+            raise ValueError('Invalid browse response')
+        for alert in data.get('alerts', []):
+            if alert.get('alertRenderer', {}).get('type') == 'ERROR':
+                raise ValueError('Browse access denied')
+
+        containers = []
+        container_names = {
+            'playlistVideoListRenderer', 'playlistVideoListContinuation',
+            'gridRenderer', 'gridContinuation', 'horizontalListRenderer',
+        }
+
+        def collect(node):
+            if isinstance(node, list):
+                for child in node:
+                    collect(child)
+            elif isinstance(node, dict):
+                if 'tabRenderer' in node:
+                    tab = node['tabRenderer']
+                    if tab.get('selected', True):
+                        collect(tab.get('content', {}))
+                    return
+                for key, value in node.items():
+                    if key in container_names:
+                        containers.append(value)
+                    elif key in ('appendContinuationItemsAction', 'reloadContinuationItemsCommand'):
+                        containers.append({'contents': value.get('continuationItems', [])})
+                    elif key not in ('secondaryContents', 'header', 'sidebar'):
+                        collect(value)
+
+        for key in ('contents', 'continuationContents', 'onResponseReceivedActions',
+                    'onResponseReceivedEndpoints', 'onResponseReceivedCommands'):
+            collect(data.get(key))
+        if not containers:
+            raise ValueError('Unrecognized Watch Later page')
+
+        def text(value):
+            return value.get('simpleText') or ''.join(
+                run.get('text', '') for run in value.get('runs', [])
+            )
+
+        items = []
+        next_token = None
+        for container in containers:
+            for continuation in container.get('continuations', []):
+                next_token = continuation.get('nextContinuationData', {}).get('continuation') or next_token
+            for entry in container.get('contents', container.get('items', [])):
+                continuation = entry.get('continuationItemRenderer', {})
+                next_token = continuation.get('continuationEndpoint', {}).get(
+                    'continuationCommand', {}
+                ).get('token') or next_token
+                renderer = next((entry[key] for key in (
+                    'playlistVideoRenderer', 'videoRenderer', 'gridVideoRenderer', 'tileRenderer',
+                ) if key in entry), None)
+                if not renderer:
+                    if not continuation and 'playlistUnavailableVideoRenderer' not in entry:
+                        raise ValueError('Unrecognized Watch Later item')
+                    continue
+                tile = 'tileRenderer' in entry
+                if tile and renderer.get('contentType', 'TILE_CONTENT_TYPE_VIDEO') != 'TILE_CONTENT_TYPE_VIDEO':
+                    continue
+                video_id = renderer.get('videoId') or renderer.get('contentId')
+                if not video_id or renderer.get('isPlayable') is False:
+                    continue
+                metadata = renderer.get('metadata', {}).get('tileMetadataRenderer', {}) if tile else renderer
+                byline = (renderer.get('shortBylineText') or renderer.get('longBylineText')
+                          or renderer.get('ownerText') or {})
+                channel_id = next((run.get('navigationEndpoint', {}).get(
+                    'browseEndpoint', {}
+                ).get('browseId') for run in byline.get('runs', []) if run.get(
+                    'navigationEndpoint', {}
+                ).get('browseEndpoint', {}).get('browseId')), '')
+                header = renderer.get('header', {}).get('tileHeaderRenderer', {}) if tile else renderer
+                thumbnails = header.get('thumbnail', {}).get('thumbnails', [])
+                duration = renderer.get('lengthSeconds')
+                if duration is None:
+                    length = text(renderer.get('lengthText', {}))
+                    if not length:
+                        length = next((text(overlay['thumbnailOverlayTimeStatusRenderer'].get('text', {}))
+                                       for overlay in header.get('thumbnailOverlays', [])
+                                       if 'thumbnailOverlayTimeStatusRenderer' in overlay), '')
+                    if re.fullmatch(r'\d+(?::\d{2}){1,2}', length):
+                        duration = 0
+                        for part in length.split(':'):
+                            duration = duration * 60 + int(part)
+                thumbnail = thumbnails[-1].get('url', '') if thumbnails else ''
+                if thumbnail.startswith('//'):
+                    thumbnail = 'https:' + thumbnail
+                if not thumbnail.startswith('https://'):
+                    thumbnail = f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg'
+                items.append({
+                    'id': renderer.get('setVideoId') or video_id,
+                    'snippet': {
+                        'resourceId': {'videoId': video_id},
+                        'title': text(metadata.get('title', {})),
+                        'videoOwnerChannelId': channel_id,
+                        'videoOwnerChannelTitle': text(byline),
+                        'thumbnails': {'medium': {'url': thumbnail}},
+                        'position': len(items),
+                    },
+                    'duration_seconds': int(duration) if duration is not None else None,
+                })
+        if next_token is not None and (not isinstance(next_token, str) or len(next_token) > 8192):
+            raise ValueError('Invalid continuation')
+        return items, next_token
+
     def fetch_innertube_subscriptions(self) -> list[dict]:
         """Fetch subscriptions via InnerTube FEchannels endpoint."""
         body = {
@@ -1355,9 +1487,18 @@ class YouTubeService:
         return self.public.fetch_video_details(video_ids)
 
     def fetch_playlists(self):
-        return self.public.fetch_playlists()
+        watch_later = {
+            'id': 'WL',
+            'snippet': {'title': 'Watch Later', 'description': '', 'thumbnails': {}},
+            'contentDetails': {'itemCount': None},
+            'status': {'privacyStatus': 'private'},
+            'read_only': True,
+        }
+        return [watch_later] + [item for item in self.public.fetch_playlists() if item.get('id') != 'WL']
 
     def fetch_playlist_items(self, playlist_id, max_results=50, page_token=None):
+        if playlist_id == 'WL':
+            return self.innertube.fetch_watch_later(page_token)
         return self.public.fetch_playlist_items(playlist_id, max_results, page_token)
 
     def add_to_playlist(self, playlist_id, video_id):

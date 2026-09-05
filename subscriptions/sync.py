@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 
 from django.utils import timezone
+from googleapiclient.errors import HttpError
 
 from .models import Feed, Subscription, SubscriptionCategory, Video
 from .youtube_service import YouTubeService
@@ -224,7 +225,18 @@ def _fetch_channel_videos(credentials, channel_id: str, force: bool) -> tuple[in
         published_after = latest_video.published_at.isoformat()
 
     # Fetch uploads
-    uploads = yt_service.fetch_uploads(playlist_id, published_after=published_after)
+    try:
+        uploads = yt_service.fetch_uploads(playlist_id, published_after=published_after)
+    except HttpError as error:
+        if error.resp.status != 404 or not isinstance(error.error_details, list) or not any(
+            isinstance(detail, dict) and detail.get('reason') == 'playlistNotFound'
+            for detail in error.error_details
+        ):
+            raise
+        logger.warning("Uploads playlist unavailable for channel %s", channel_id)
+        sub.videos_synced_at = timezone.now()
+        sub.save(update_fields=['videos_synced_at'])
+        return 0, 'no_uploads'
 
     # Create Video records for new uploads
     new_video_ids = []
